@@ -242,9 +242,6 @@ async function searchNestedRepos(
 	};
 }
 
-export type SearchToolInput = ZvecSearchQueryParams & { root?: string };
-export type StatusToolInput = { root?: string };
-
 /** Register zvec_search / zvec_index / zvec_status. */
 export function registerZvecTools(pi: ExtensionAPI): void {
 	const runZg = createZgRunner((command, args, options) => pi.exec(command, args, options));
