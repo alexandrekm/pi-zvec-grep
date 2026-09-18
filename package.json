@@ -52,8 +52,9 @@
     "settings:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-settings.mjs",
     "autoindex:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-autoindex.mjs",
 		"rootpolicy:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-root-policy.mjs",
+		"seed:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-seed.mjs",
     "format:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-format.mjs",
-    "test": "npm run cli:test && npm run surface:test && npm run queries:test && npm run indexing:test && npm run errors:test && npm run settings:test && npm run autoindex:test && npm run rootpolicy:test && npm run format:test"
+    "test": "npm run cli:test && npm run surface:test && npm run queries:test && npm run indexing:test && npm run errors:test && npm run settings:test && npm run autoindex:test && npm run rootpolicy:test && npm run seed:test && npm run format:test"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

@@ -27,7 +27,10 @@ import {
 	ZG_INDEX_TIMEOUT_MS,
 	ZG_STATUS_TIMEOUT_MS,
 } from '../core/zg.ts';
-import { assessRoot } from '../core/root-policy.ts';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { assessRoot, enclosingGitRoot } from '../core/root-policy.ts';
+import { seedWorktreeIndex } from '../core/seed.ts';
 
 /**
  * Routing guidance baked into tool descriptions: zg is the semantic/layered
@@ -490,15 +493,27 @@ function zgHandler(exec: (command: string, args: string[], options: { cwd?: stri
 /**
  * Auto-index on session start (setting: `autoIndex`, off by default).
  *
- * Fires on every `session_start` reason (deliberately no reason filter): the
- * first step is `zg status --check-ready`, and the index is only built or
- * updated when that guard fails, so the steady-state cost on a healthy index
- * is one fast status call. The build runs fire-and-forget — never awaited
- * and never throwing into the lifecycle hook — and failures end up as
- * `ui.notify` only. An in-flight per-root set prevents a concurrent build
- * from being restarted while one is running. The hook is always registered;
- * the setting is read fresh on each start, so the menu toggle takes effect
- * from the next session start.
+ * Root resolution: the NEAREST ENCLOSING GIT REPO of the session cwd (a
+ * `.git` dir or worktree gitfile at or above it), falling back to the cwd.
+ * One index per repo/worktree — never per-subdir stubs — and a session in a
+ * worktree always targets that worktree's own index (zg honors an explicit
+ * root argument; only the cwd-based forms walk up to an ancestor).
+ *
+ * Flow: when the root has no own manifest, build (policy permitting),
+ * seeding a worktree first from its main checkout's base index when one
+ * exists — turn-1 search, then the build updates it in place. When an own
+ * index exists, `zg status --check-ready` gates an update, so the
+ * steady-state cost is one fast status call. The own-manifest check matters:
+ * zg resolves the nearest ANCESTOR index, so without it an ancestor's
+ * "ready" would suppress leaf/worktree builds forever (the shadowing
+ * failure that froze every repo under a 4.1 GB ~/code index).
+ *
+ * The root policy (see src/core/root-policy.ts) is applied before any
+ * build: $HOME and umbrella/container roots are skipped with an info
+ * notice explaining why and what to do instead. The build runs
+ * fire-and-forget — never awaited, never throwing into the lifecycle hook —
+ * under a cross-process lock; failures end up as `ui.notify` only. The
+ * hook is always registered; the setting is read fresh on each start.
  */
 export function registerAutoIndex(pi: ExtensionAPI): void {
 	const inflight = new Set<string>();
@@ -513,24 +528,31 @@ export function registerAutoIndex(pi: ExtensionAPI): void {
 		const cwd = ctx.cwd;
 		const settings = loadSettings(cwd);
 		if (!settings.autoIndex) return;
-		const root = normalizeRoot(undefined, cwd);
+		const root = enclosingGitRoot(cwd) ?? normalizeRoot(undefined, cwd);
 		if (inflight.has(root)) return;
 		inflight.add(root);
+		const hasOwnIndex = (): boolean => existsSync(join(root, '.zvec-grep', 'manifest.json'));
 		void (async () => {
 			let lock: AutoIndexLock | undefined;
 			try {
-				const check = await pi.exec('zg', ['status', '--check-ready'], { cwd: root, timeout: ZG_STATUS_TIMEOUT_MS });
-				if (check.code === 0) return; // index ready: nothing to do
+				if (hasOwnIndex()) {
+					const check = await pi.exec('zg', ['status', '--check-ready'], { cwd: root, timeout: ZG_STATUS_TIMEOUT_MS });
+					if (check.code === 0) return; // own index ready: nothing to do
+				}
 				const assessment = assessRoot(root, settings.rootPolicy);
 				if (!assessment.allowed) {
-					// Only notified when a build would actually have happened (the
-					// status guard failed), so healthy sessions never see noise.
 					notify(ctx, `zvec: auto index skipped for ${root} — ${assessment.reason}`, 'info');
 					return;
 				}
 				lock = acquireAutoIndexLock(root);
 				if (!lock) return; // another pi process is already building this root
-				notify(ctx, `zvec: index missing or stale — building in background…`, 'info');
+				if (!hasOwnIndex()) {
+					const seed = seedWorktreeIndex(root);
+					if (seed.seeded) notify(ctx, `zvec: worktree index seeded from the main checkout — updating in background…`, 'info');
+					else notify(ctx, `zvec: index missing${seed.skipped ? ` (${seed.skipped})` : ''} — building in background…`, 'info');
+				} else {
+					notify(ctx, `zvec: index stale — updating in background…`, 'info');
+				}
 				const result = await pi.exec('zg', ['index', root], { cwd: root, timeout: ZG_INDEX_TIMEOUT_MS });
 				if (result.code !== 0) {
 					const detail = (result.stderr || result.stdout || `exit ${result.code}`).split('\n')[0];

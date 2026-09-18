@@ -3,13 +3,26 @@
  * Behavior contract for the session-start auto-index hook (setting:
  * `autoIndex`, off by default):
  *   - hook is registered on `session_start` and runs for every reason
- *     (no reason filter)
- *   - guard: `zg status --check-ready` first; ready (exit 0) → nothing more
+ *   - root resolution: the NEAREST ENCLOSING GIT REPO of the cwd (`.git` dir
+ *     or worktree gitfile), falling back to the cwd — a session in a repo
+ *     subdir indexes the repo root, never a per-subdir stub
+ *   - own-manifest gate: an own index at the root is guarded by
+ *     `zg status --check-ready`; a MISSING own manifest builds directly
+ *     (an ancestor's "ready" must never suppress a leaf build — that is
+ *     the shadowing failure that froze every repo under a mega-index)
+ *   - worktree seeding: a worktree without an index is seeded from its main
+ *     checkout's base index (manifest rootPaths rewritten to the worktree)
+ *     before the background build; the build argv always pins the WORKTREE
+ *     root — it never targets the main checkout
  *   - not ready + autoIndex on → fire-and-forget `zg index <root>`; the hook
  *     itself resolves while the build is still running
  *   - in-flight: concurrent starts in the same cwd yield a single build;
  *     different cwds are independent roots; slot releases after completion
- *   - autoIndex off / missing → the guard never runs
+ *   - root policy: umbrella/container roots are never auto-indexed (skip
+ *     notice, no index call); allowRoots re-enables one specific root
+ *   - cross-process lock: a held lockfile suppresses the build; a stale
+ *     lock is stolen
+ *   - autoIndex off / missing → nothing runs
  *   - build failure → error notification path, no throw out of the hook
  * Uses the fake zg + fake pi harness like verify-settings.mjs.
  */
@@ -40,6 +53,12 @@ try {
 		fs.mkdirSync(path.join(home, '.pi', 'agent', 'pi-zvec-grep'), { recursive: true });
 		fs.writeFileSync(userConfigFile(), JSON.stringify({ ...DEFAULT_SETTINGS, autoIndex: b }));
 	};
+	/** Mark a root as having its own index (manifest is the canonical marker). */
+	const giveOwnIndex = (root) => {
+		fs.mkdirSync(path.join(root, '.zvec-grep'), { recursive: true });
+		fs.writeFileSync(path.join(root, '.zvec-grep', 'manifest.json'), JSON.stringify({ manifestVersion: 1, rootPaths: [] }));
+	};
+	const settle = (ms) => new Promise((r) => setTimeout(r, ms));
 
 	// --- off (default): the guard never runs ---------------------------------
 	{
@@ -48,7 +67,7 @@ try {
 		const cwd = path.join(home, 'off');
 		fs.mkdirSync(cwd, { recursive: true });
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 30));
+		await settle(30);
 		assert.equal(fake.readState('status'), undefined, 'autoIndex off: no status guard call');
 		assert.equal(fake.readState('index'), undefined, 'autoIndex off: no index call');
 	}
@@ -60,69 +79,138 @@ try {
 		const cwd = path.join(home, 'missing');
 		fs.mkdirSync(cwd, { recursive: true });
 		await pi.emit('session_start', { type: 'session_start', reason: 'new' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 30));
+		await settle(30);
 		assert.equal(fake.readState('status'), undefined, 'missing setting (reason "new"): no guard — gating is the setting, not the reason');
 	}
 
-	// --- on + guard passes (ready): no index call -----------------------------
+	// --- own index ready: one status call, no build ---------------------------
 	{
 		setAutoIndex(true);
 		process.env.ZFAKE_MODE = 'ready';
 		fake.resetState();
 		const cwd = path.join(home, 'ready');
 		fs.mkdirSync(cwd, { recursive: true });
+		giveOwnIndex(cwd);
 		await pi.emit('session_start', { type: 'session_start', reason: 'reload' }, makeCtx({ cwd }));
-		// Poll for the guard to land (fake-zg spawn + node startup can exceed
-		// a fixed 100 ms wait on slower machines — this was flaky at 100 ms).
 		let status;
 		for (let i = 0; i < 40 && !status; i += 1) {
-			await new Promise((r) => setTimeout(r, 50));
+			await settle(50);
 			status = fake.readState('status');
 		}
-		assert.ok(status, 'autoIndex on + ready: the guard ran');
-		assert.deepEqual(status.args, ['--check-ready'], 'guard argv is `zg status --check-ready` (fake records subcommand separately)');
-		assert.equal(status.cwd, fs.realpathSync(cwd), 'guard cwd is the session cwd (index root = cwd, realpath on macOS)');
+		assert.ok(status, 'autoIndex on + own index: the status guard ran');
+		assert.deepEqual(status.args, ['--check-ready'], 'guard argv is `zg status --check-ready`');
+		assert.equal(status.cwd, fs.realpathSync(cwd), 'guard cwd is the resolved root (realpath on macOS)');
+		await settle(100);
 		assert.equal(fake.readState('index'), undefined, 'guard exit 0: no index call');
 	}
 
-	// --- on + guard fails (stale): fire-and-forget index --------------------
+	// --- NO own manifest + ancestor "ready": build anyway (anti-shadowing) ---
+	{
+		// ZFAKE_MODE stays 'ready' — a walk-up status would wrongly pass.
+		// The own-manifest gate must skip the status call and build directly.
+		fake.resetState();
+		const cwd = path.join(home, 'shadowed');
+		fs.mkdirSync(cwd, { recursive: true });
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
+		let index;
+		for (let i = 0; i < 40 && !index; i += 1) {
+			await settle(50);
+			index = fake.readState('index');
+		}
+		assert.ok(index, 'missing own manifest: build runs even though a walk-up status would say ready');
+		assert.equal(index.args[0], cwd, 'build pins the root');
+		assert.equal(fake.readState('status'), undefined, 'no status call when the own manifest is missing');
+	}
+
+	// --- own index stale: fire-and-forget update ------------------------------
 	process.env.ZFAKE_MODE = 'stale-slow';
 	{
 		fake.resetState();
 		const cwd = path.join(home, 'stale');
 		fs.mkdirSync(cwd, { recursive: true });
+		giveOwnIndex(cwd);
 		const started = pi.emit('session_start', { type: 'session_start', reason: 'resume' }, makeCtx({ cwd }));
 		assert.deepEqual(await started, [undefined], 'handler returns undefined (no cancel semantics)');
 		assert.ok(!fs.existsSync(path.join(fake.stateDir, 'index.json')), 'fire-and-forget: no index recorded immediately after the hook returns');
-		await new Promise((r) => setTimeout(r, 500)); // still building (fake sleeps 1s)
+		await settle(500); // still building (fake sleeps 1s)
 		assert.ok(fake.readState('status'), 'the guard ran first (by the time the build is in flight)');
 		assert.ok(!fs.existsSync(path.join(fake.stateDir, 'index.json')), 'hook did not await the build: still in flight mid-way');
-		await new Promise((r) => setTimeout(r, 1300)); // settle
+		await settle(1300); // settle
 		const index = fake.readState('index');
 		assert.ok(index, 'guard failed: background index finally ran');
 		assert.deepEqual(index.args, [cwd], 'index argv pins the root');
-		assert.equal(index.cwd, fs.realpathSync(cwd), 'index cwd is the session cwd');
+		assert.equal(index.cwd, fs.realpathSync(cwd), 'index cwd is the resolved root');
 		assert.ok(calls.exec.some((e) => e.command === 'zg' && e.args[0] === 'index' && e.args[1] === cwd && e.options?.timeout === 600_000), 'index carries the ZG_INDEX timeout');
+	}
+
+	// --- root resolution: a repo subdir indexes the REPO root -----------------
+	{
+		process.env.ZFAKE_MODE = 'missing-index';
+		fake.resetState();
+		const repo = path.join(home, 'therepo');
+		fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+		fs.mkdirSync(path.join(repo, 'deep', 'sub'), { recursive: true });
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd: path.join(repo, 'deep', 'sub') }));
+		let index;
+		for (let i = 0; i < 40 && !index; i += 1) {
+			await settle(50);
+			index = fake.readState('index');
+		}
+		assert.ok(index, 'subdir session: build ran');
+		assert.equal(index.args[0], repo, 'root resolved to the enclosing git repo, not the cwd');
+		assert.ok(fs.existsSync(path.join(repo, '.zvec-grep', 'locks')), 'lock dir created at the repo root');
+	}
+
+	// --- worktree: seed from the main base index, build pins the worktree ----
+	{
+		fake.resetState();
+		const main = path.join(home, 'mainrepo');
+		fs.mkdirSync(path.join(main, '.git'), { recursive: true });
+		fs.mkdirSync(path.join(main, '.zvec-grep'), { recursive: true });
+		fs.writeFileSync(path.join(main, '.zvec-grep', 'manifest.json'), JSON.stringify({
+			manifestVersion: 1,
+			rootPaths: [{ absolutePath: main, recursive: true }],
+		}));
+		fs.writeFileSync(path.join(main, '.zvec-grep', 'index.zvec'), 'fake-base-index');
+		const worktree = path.join(home, 'wt');
+		fs.mkdirSync(worktree, { recursive: true });
+		fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${main}/.git/worktrees/wt\n`);
+		const notices = [];
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd: worktree, ui: { notify: (m, t) => notices.push({ m, t }) } }));
+		let index;
+		for (let i = 0; i < 40 && !index; i += 1) {
+			await settle(50);
+			index = fake.readState('index');
+		}
+		assert.ok(index, 'worktree session: build ran');
+		assert.equal(index.args[0], worktree, 'build argv pins the WORKTREE root — never the main checkout');
+		const seeded = JSON.parse(fs.readFileSync(path.join(worktree, '.zvec-grep', 'manifest.json'), 'utf8'));
+		assert.equal(seeded.rootPaths[0].absolutePath, fs.realpathSync(worktree), 'seeded manifest rootPaths rewritten to the worktree');
+		assert.equal(fs.readFileSync(path.join(worktree, '.zvec-grep', 'index.zvec'), 'utf8'), 'fake-base-index', 'base index files copied');
+		assert.ok(!fs.existsSync(path.join(main, '.zvec-grep', 'locks')), 'main checkout untouched (no lock dir appears there)');
+		assert.ok(notices.some((n) => /seeded/.test(n.m)), 'seed notice shown', notices.map((n) => n.m).join(' | '));
 	}
 
 	// --- in-flight: concurrent starts in one cwd → a single build -------------
 	{
+		process.env.ZFAKE_MODE = 'stale-slow';
 		const cwd = path.join(home, 'inflight');
 		fs.mkdirSync(cwd, { recursive: true });
+		giveOwnIndex(cwd);
 		calls.exec.length = 0;
 		await Promise.all(
 			['startup', 'reload', 'new'].map((reason) => pi.emit('session_start', { type: 'session_start', reason }, makeCtx({ cwd }))),
 		);
-		await new Promise((r) => setTimeout(r, 500)); // mid-flight
+		await settle(500); // mid-flight
 		const buildsMid = calls.exec.filter((e) => e.command === 'zg' && e.args[0] === 'index').length;
 		assert.equal(buildsMid, 1, 'mid-flight: exactly one in-flight build');
-		await new Promise((r) => setTimeout(r, 1200)); // settle
+		await settle(1200); // settle
 		const builds = calls.exec.filter((e) => e.command === 'zg' && e.args[0] === 'index');
 		assert.equal(builds.length, 1, 'after settling: still a single build');
 
 		// slot released after completion: the next start runs again
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 1650));
+		await settle(1650);
 		const buildsAfter = calls.exec.filter((e) => e.command === 'zg' && e.args[0] === 'index').length;
 		assert.equal(buildsAfter, 2, 'slot released: a later start starts a fresh build');
 	}
@@ -136,7 +224,7 @@ try {
 		calls.exec.length = 0;
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd: a }));
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd: b }));
-		await new Promise((r) => setTimeout(r, 1650));
+		await settle(1650);
 		const builds = calls.exec.filter((e) => e.command === 'zg' && e.args[0] === 'index');
 		assert.equal(builds.length, 2, 'per-root in-flight: each cwd gets its own build');
 		assert.deepEqual(builds.map((e) => e.args[1]).sort(), [a, b].sort(), 'each build pins its own root');
@@ -154,22 +242,22 @@ try {
 			hookError = error;
 		}
 		assert.equal(hookError, undefined, 'failed build must not reject the session_start emit');
-		await new Promise((r) => setTimeout(r, 300));
+		await settle(300);
 		assert.ok(calls.exec.some((e) => e.args[0] === 'index' && e.args[1] === cwd), 'failure path still attempted the build');
 	}
 
 	// --- root policy: umbrella roots are never auto-indexed -------------------
 	{
-		process.env.ZFAKE_MODE = 'missing-index'; // status guard fails, build would run
+		process.env.ZFAKE_MODE = 'missing-index'; // own manifest missing → build would run
 		fake.resetState();
 		const cwd = path.join(home, 'umbrella');
 		fs.mkdirSync(cwd, { recursive: true });
 		for (const n of ['a', 'b', 'c']) fs.mkdirSync(path.join(cwd, n, '.git'), { recursive: true });
 		const notices = [];
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd, ui: { notify: (m, t) => notices.push({ m, t }) } }));
-		await new Promise((r) => setTimeout(r, 300));
-		assert.ok(fake.readState('status'), 'the status guard still ran (skip only applies to the build)');
+		await settle(300);
 		assert.equal(fake.readState('index'), undefined, 'umbrella root: no index call');
+		assert.equal(fake.readState('status'), undefined, 'no status call either — the policy check runs first when the manifest is missing');
 		assert.ok(
 			notices.some((n) => n.t === 'info' && /skipped/.test(n.m) && /umbrella/.test(n.m)),
 			'skip notice explains the umbrella reason',
@@ -186,8 +274,12 @@ try {
 		fake.resetState();
 		const cwd = path.join(home, 'umbrella');
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 300));
-		assert.ok(fake.readState('index'), 'allowRoots: the umbrella root builds when explicitly allowlisted');
+		let index;
+		for (let i = 0; i < 40 && !index; i += 1) {
+			await settle(50);
+			index = fake.readState('index');
+		}
+		assert.ok(index, 'allowRoots: the umbrella root builds when explicitly allowlisted');
 		fs.writeFileSync(userConfigFile(), JSON.stringify({ ...DEFAULT_SETTINGS, autoIndex: true }));
 	}
 
@@ -195,10 +287,12 @@ try {
 	{
 		fake.resetState();
 		const cwd = path.join(home, 'locked');
+		fs.mkdirSync(cwd, { recursive: true });
+		giveOwnIndex(cwd); // own index present → status runs, then the lock is checked
 		fs.mkdirSync(path.join(cwd, '.zvec-grep', 'locks'), { recursive: true });
 		fs.writeFileSync(path.join(cwd, '.zvec-grep', 'locks', 'autoindex.lock'), 'other-pid\n');
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 300));
+		await settle(300);
 		assert.ok(fake.readState('status'), 'guard ran under a foreign lock');
 		assert.equal(fake.readState('index'), undefined, 'lock held by another process: no build');
 		// stale lock (backdated 11 min) is stolen and the build proceeds
@@ -206,8 +300,12 @@ try {
 		const old = new Date(Date.now() - 11 * 60_000);
 		fs.utimesSync(stale, old, old);
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 300));
-		assert.ok(fake.readState('index'), 'stale lock stolen: build proceeds');
+		let index;
+		for (let i = 0; i < 40 && !index; i += 1) {
+			await settle(50);
+			index = fake.readState('index');
+		}
+		assert.ok(index, 'stale lock stolen: build proceeds');
 	}
 
 	console.log('All auto-index assertions passed.');

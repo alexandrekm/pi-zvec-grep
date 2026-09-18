@@ -375,3 +375,42 @@ adoption-fix work from the impulso-pi investigation
 Publishing note: the tag-triggered `publish.yml` targets the upstream npm
 org; this fork is consumed via `git:` pi packages (impulso-pi profiles),
 not npm. Upstream PR for (1)–(4) is desirable once validated in daily use.
+
+---
+
+# Fork notes addendum — 2026-09-18 (same day, round 2)
+
+Follow-up after the user clarified their umbrella/worktree workflow (they run
+sessions in umbrella-repo worktrees a lot; base indexes live on the main
+checkouts, reindexed by their own command after pulls). New zg 0.2.2 facts
+that shaped this round, all verified empirically:
+
+- `zg index <explicit-root>` honors the explicit root even when an ancestor
+  has an index — worktree builds can never write back into the main checkout.
+- `zg index` WITHOUT a root arg (cwd-based) resolves the NEAREST ANCESTOR
+  index — and so do `status`/`query`. An index at a container/umbrella root
+  therefore makes every repo below it PERMANENTLY un-indexable (they resolve
+  up to the stub). This is why umbrella/container roots stay blocked even
+  though the user wanted `~/code/mtv/*` umbrella roots indexed: the stub
+  would lock out the submodule repos beneath it. The compromise that
+  actually serves the workflow:
+
+1. **autoIndex root = nearest enclosing git repo** (`enclosingGitRoot` in
+   root-policy.ts: first `.git` dir or gitfile at/above the cwd). Sessions
+   in a repo subdir or a worktree index that repo/worktree — one index per
+   repo, no per-subdir stubs.
+2. **Worktree seeding** (`src/core/seed.ts`): a worktree without an index
+   is seeded from its main checkout's base index (manifest rootPaths
+   rewritten to the worktree, 2 GB cap), then updated in the background.
+   Verified end-to-end against real git + real zg: seed → update → main
+   untouched → semantic search finds worktree-only AND base content.
+3. **Own-manifest gate**: a missing own manifest builds directly, skipping
+   the `status --check-ready` call — an ancestor's "ready" can no longer
+   suppress leaf/worktree builds (the shadowing hole).
+4. Umbrella-block reason text now explains the ancestor-shadowing mechanism
+   and the `root=<submodule>` escape for umbrella-root sessions (zvec_search
+   pins cwd to `root`, bypassing the walk-up).
+
+Tests: `seed:test` suite added; `autoindex:test` rewritten for the new flow
+(repo-subdir resolution, seeding + never-write-back argv, anti-shadowing,
+policy-first-when-missing). 10 suites green.

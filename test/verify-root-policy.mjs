@@ -19,7 +19,7 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-zvec-grep-rootpolicy-'));
 
 try {
 	const mod = await import(`../src/core/root-policy.ts?rootpolicy-test=${Date.now()}`);
-	const { assessRoot, countNestedRepos, expandTilde, DEFAULT_ROOT_POLICY } = mod;
+	const { assessRoot, countNestedRepos, enclosingGitRoot, expandTilde, DEFAULT_ROOT_POLICY } = mod;
 	const ws = await import(`../src/core/workspace.ts?rootpolicy-test=${Date.now()}`);
 	const { acquireAutoIndexLock } = ws;
 
@@ -79,6 +79,7 @@ try {
 	const blocked = assessRoot(makeUmbrella('blocked', 4));
 	assert.equal(blocked.allowed, false, 'four nested repos: umbrella → blocked');
 	assert.match(blocked.reason ?? '', /umbrella/, 'umbrella block carries a reason');
+	assert.match(blocked.reason ?? '', /NEAREST ANCESTOR|ancestor/, 'reason explains the ancestor-shadowing mechanism');
 	assert.match(blocked.reason ?? '', /allowRoots/, 'reason mentions the escape hatch');
 
 	// threshold is configurable
@@ -98,6 +99,24 @@ try {
 
 	// default policy object shape
 	assert.deepEqual(DEFAULT_ROOT_POLICY, { allowRoots: [], maxNestedRepos: 3 }, 'default policy: empty allowlist, threshold 3');
+
+	// --- enclosingGitRoot ------------------------------------------------------
+	{
+		const repo = path.join(home, 'enclosing');
+		fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+		fs.mkdirSync(path.join(repo, 'a', 'b'), { recursive: true });
+		assert.equal(enclosingGitRoot(repo), repo, 'the repo root itself resolves to itself');
+		assert.equal(enclosingGitRoot(path.join(repo, 'a', 'b')), repo, 'a deep subdir resolves up to the repo root');
+		// worktree-style: .git as a FILE marks the repo root too
+		const wt = path.join(home, 'enclosing-wt');
+		fs.mkdirSync(wt, { recursive: true });
+		fs.writeFileSync(path.join(wt, '.git'), 'gitdir: /elsewhere/.git/worktrees/x\n');
+		fs.mkdirSync(path.join(wt, 'src'), { recursive: true });
+		assert.equal(enclosingGitRoot(path.join(wt, 'src')), wt, 'a worktree gitfile marks the worktree as the repo root');
+		const plain = path.join(home, 'enclosing-plain');
+		fs.mkdirSync(path.join(plain, 'x'), { recursive: true });
+		assert.equal(enclosingGitRoot(path.join(plain, 'x')), undefined, 'no .git anywhere above → undefined');
+	}
 
 	// --- acquireAutoIndexLock --------------------------------------------------
 	const lockRoot = path.join(home, 'lockroot');

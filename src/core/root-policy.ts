@@ -7,14 +7,15 @@
  *   home tree to compute freshness (status/query appear to hang for minutes
  *   from any directory under $HOME). This exact failure disabled zvec for
  *   every profile for days once.
- * - Umbrella roots — a root whose shallow tree contains several nested git
- *   repos (submodule-style checkouts like an umbrella repo or a `~/code`
- *   directory of repos). zg 0.2.x hard-skips nested repos when indexing
- *   (even `--no-ignore` and explicit globs cannot include them), so an
- *   umbrella index can only ever contain the handful of root-level files —
- *   near-empty noise that also *shadows* real indexes: zg resolves the
- *   nearest ancestor with an index, so sessions inside a submodule would
- *   resolve up to the umbrella stub instead of building their own.
+ * - Umbrella/container roots — a root whose shallow tree contains several
+ *   nested git repos (an umbrella repo with submodules, or a `~/code`-style
+ *   directory of repos). Two hard reasons, both verified against zg 0.2.2:
+ *   zg cannot index nested-repo content (even `--no-ignore` and explicit
+ *   globs cannot include them), so such an index only ever holds the
+ *   root-level files; and zg resolves the NEAREST ANCESTOR index for
+ *   status/query/index — an index at a container root makes every repo
+ *   below it resolve up to the stub and therefore permanently
+ *   un-indexable. Leaf repos stay indexable only while no ancestor is.
  *
  * `allowRoots` is the explicit escape hatch (a root that trips the
  * nested-repo heuristic but should be indexed anyway — knowing zg will
@@ -128,6 +129,26 @@ export function countNestedRepos(root: string, stopAfter = Number.POSITIVE_INFIN
 }
 
 /**
+ * The nearest enclosing git repository root for a working directory: the
+ * first ancestor (self included) that carries a `.git` entry (dir for a
+ * normal repo, FILE for a worktree or submodule). Undefined when no repo
+ * encloses the directory. Pure fs — no git invocation, no walk below.
+ */
+export function enclosingGitRoot(dir: string): string | undefined {
+	let current = path.resolve(dir);
+	if (path.basename(current) === '.git') current = path.dirname(current);
+	for (;;) {
+		try {
+			fs.statSync(path.join(current, '.git'));
+			return current;
+		} catch {}
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+/**
  * Assess one candidate index root against the policy. Pure: no zg calls, no
  * writes. The home comparison and `allowRoots` matching are realpath-based
  * so `~`, symlinks, and trailing differences cannot sneak a root through.
@@ -152,10 +173,13 @@ export function assessRoot(root: string, policy: RootPolicy = DEFAULT_ROOT_POLIC
 		return {
 			allowed: false,
 			reason:
-				`root is an umbrella workspace: ${nested}+ nested git repos at depth ≤ 2, and zg cannot index ` +
-				'nested repos (only root-level files would be indexed, and the stub index shadows real ' +
-				'leaf-repo indexes for sessions below it). Search still works via fts/--rg without an index; ' +
-				`to index anyway add this root to rootPolicy.allowRoots in the pi-zvec-grep config`,
+				`root holds ${nested}+ nested git repos at depth ≤ 2 (an umbrella/container root). ` +
+				'zg cannot index nested-repo content (only root-level files would be indexed), and worse: ' +
+				'zg resolves the NEAREST ANCESTOR index for status/query/index — so an index here would ' +
+				'make every repo below it permanently un-indexable (they would resolve up to this stub). ' +
+				'Index the specific repo instead (a session inside it does this automatically); search ' +
+				'from an umbrella root still works via fts/--rg, or by passing root=<submodule> to ' +
+				'zvec_search. To index anyway add this root to rootPolicy.allowRoots in the config',
 		};
 	}
 	return { allowed: true };
