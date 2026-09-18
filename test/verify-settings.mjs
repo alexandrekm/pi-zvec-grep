@@ -28,7 +28,7 @@ process.env.PI_CODING_AGENT_DIR = path.join(home, '.pi', 'agent');
 
 try {
 	const mod = await import(`../src/extension/config.ts?settings-test=${Date.now()}`);
-	const { DEFAULT_SETTINGS, deactivateProjectScope, loadProjectFileValues, loadSettings, projectConfigFile, saveSettings, userConfigFile } = mod;
+	const { DEFAULT_SETTINGS, DEFAULT_ROOT_POLICY, deactivateProjectScope, loadProjectFileValues, loadSettings, projectConfigFile, saveSettings, userConfigFile } = mod;
 
 	assert.equal(userConfigFile(), path.join(home, '.pi', 'agent', 'pi-zvec-grep', 'config.json'), 'user config path honors PI_CODING_AGENT_DIR');
 	assert.equal(DEFAULT_SETTINGS.projectScope, false, 'default flag is false (user layer)');
@@ -41,7 +41,7 @@ try {
 	// --- user layer persistence (values only — no scope flag) --------------
 	saveSettings({ ...DEFAULT_SETTINGS, defaultLimit: 10, autoIndex: true }, 'user');
 	const rawUser = JSON.parse(fs.readFileSync(userConfigFile(), 'utf8'));
-	assert.deepEqual(rawUser, { defaultLimit: 10, autoIndex: true }, 'user file holds the values only (no projectScope flag)');
+	assert.deepEqual(rawUser, { defaultLimit: 10, autoIndex: true, rootPolicy: DEFAULT_ROOT_POLICY }, 'user file holds the values only (no projectScope flag)');
 	assert.equal(loadSettings().defaultLimit, 10, 'user value applies');
 	assert.equal(loadSettings().autoIndex, true, 'user autoIndex on');
 	assert.equal(loadSettings().projectScope, false, 'flag stays false in user scope');
@@ -54,7 +54,7 @@ try {
 	fs.writeFileSync(userConfigFile(), JSON.stringify({ projectScope: true, defaultLimit: 10, autoIndex: true }));
 	assert.equal(loadSettings(legacyCwd).projectScope, false, 'stray user-file projectScope flag is a no-op (flag is project-file-only)');
 	saveSettings({ ...DEFAULT_SETTINGS, defaultLimit: 10, autoIndex: true }, 'user');
-	assert.deepEqual(JSON.parse(fs.readFileSync(userConfigFile(), 'utf8')), { defaultLimit: 10, autoIndex: true }, 'user save strips every scope key');
+	assert.deepEqual(JSON.parse(fs.readFileSync(userConfigFile(), 'utf8')), { defaultLimit: 10, autoIndex: true, rootPolicy: DEFAULT_ROOT_POLICY }, 'user save strips every scope key');
 
 	const cwd = path.join(home, 'proj');
 	fs.mkdirSync(cwd, { recursive: true });
@@ -108,7 +108,7 @@ try {
 	// --- full-project writes (values + boolean flag) -------------------------
 	let result = saveSettings({ ...DEFAULT_SETTINGS, projectScope: true, defaultLimit: 42 }, 'project', cwd);
 	assert.equal(result.created, false, 'malformed file still exists: created stays false');
-	assert.deepEqual(JSON.parse(fs.readFileSync(projFile, 'utf8')), { defaultLimit: 42, autoIndex: false, projectScope: true }, 'project file is values + the boolean flag');
+	assert.deepEqual(JSON.parse(fs.readFileSync(projFile, 'utf8')), { defaultLimit: 42, autoIndex: false, rootPolicy: DEFAULT_ROOT_POLICY, projectScope: true }, 'project file is values + the boolean flag');
 	assert.equal(loadSettings(cwd).projectScope, true, 'project save activates this workspace');
 	assert.equal(loadSettings(cwd).defaultLimit, 42, 'project save applies the file values');
 
@@ -117,7 +117,7 @@ try {
 	fs.mkdirSync(freshCwd, { recursive: true });
 	result = saveSettings({ ...DEFAULT_SETTINGS, projectScope: true, defaultLimit: 30 }, 'project', freshCwd);
 	assert.ok(result.created, 'missing project file: created flag is set');
-	assert.deepEqual(JSON.parse(fs.readFileSync(projectConfigFile(freshCwd), 'utf8')), { defaultLimit: 30, autoIndex: false, projectScope: true }, 'first project file: values + flag');
+	assert.deepEqual(JSON.parse(fs.readFileSync(projectConfigFile(freshCwd), 'utf8')), { defaultLimit: 30, autoIndex: false, rootPolicy: DEFAULT_ROOT_POLICY, projectScope: true }, 'first project file: values + flag');
 	assert.equal(loadSettings(cwd).projectScope, true, 'freshCwd activation does not leak into the other workspace');
 
 	// deactivating in one workspace never touches another's file
@@ -126,7 +126,7 @@ try {
 	// --- deactivation: flag false, values preserved, legacy key dropped -----
 	const de = deactivateProjectScope(cwd);
 	assert.equal(de.changed, true, 'deactivateProjectScope reports a change');
-	assert.deepEqual(JSON.parse(fs.readFileSync(projFile, 'utf8')), { defaultLimit: 42, autoIndex: false, projectScope: false }, 'deactivation sets the flag false and keeps the values');
+	assert.deepEqual(JSON.parse(fs.readFileSync(projFile, 'utf8')), { defaultLimit: 42, autoIndex: false, rootPolicy: DEFAULT_ROOT_POLICY, projectScope: false }, 'deactivation sets the flag false and keeps the values');
 	assert.equal(loadSettings(cwd).projectScope, false, 'deactivated: flag false again');
 	assert.equal(loadSettings(cwd).defaultLimit, 10, 'deactivated: user value applies again');
 	assert.ok(fs.existsSync(projFile), 'deactivation never deletes the file');
@@ -141,8 +141,26 @@ try {
 
 	// --- loadProjectFileValues: dormant parked values survive re-activation -
 	fs.writeFileSync(projFile, JSON.stringify({ projectScope: false, defaultLimit: 25, autoIndex: false }));
-	assert.deepEqual(loadProjectFileValues(cwd), { defaultLimit: 25, autoIndex: false }, 'dormant file: its stored values are readable');
-	assert.deepEqual(loadProjectFileValues(legacyCwd), { defaultLimit: 7, autoIndex: false }, 'no file: built-in values (menu creates the file fresh)');
+	assert.deepEqual(loadProjectFileValues(cwd), { defaultLimit: 25, autoIndex: false, rootPolicy: DEFAULT_ROOT_POLICY }, 'dormant file: its stored values are readable');
+	assert.deepEqual(loadProjectFileValues(legacyCwd), { defaultLimit: 7, autoIndex: false, rootPolicy: DEFAULT_ROOT_POLICY }, 'no file: built-in values (menu creates the file fresh)');
+
+	// --- rootPolicy: layering + validation -----------------------------------
+	// user layer override applies to every non-project workspace
+	fs.writeFileSync(userConfigFile(), JSON.stringify({ defaultLimit: 11, autoIndex: true, rootPolicy: { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 } }));
+	assert.deepEqual(
+		loadSettings(path.join(home, 'plain')).rootPolicy,
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 },
+		'raw strings kept: tilde expansion + realpath matching happen in assessRoot',
+	);
+	// project scope: user rootPolicy does NOT leak in (built-ins apply)
+	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, defaultLimit: 7, rootPolicy: { maxNestedRepos: 2 } }));
+	assert.deepEqual(loadSettings(cwd).rootPolicy, { allowRoots: [], maxNestedRepos: 2 }, 'project file rootPolicy wins when activated');
+	assert.deepEqual(loadSettings(path.join(home, 'plain2')).rootPolicy, { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 }, 'user rootPolicy still applies elsewhere');
+	// invalid shapes fall back per-sub-key, never to the other layer
+	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, rootPolicy: { allowRoots: 'nope', maxNestedRepos: -3 } }));
+	assert.deepEqual(loadSettings(cwd).rootPolicy, DEFAULT_ROOT_POLICY, 'invalid rootPolicy sub-keys -> built-in defaults, not the user layer');
+	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, rootPolicy: 'nope' }));
+	assert.deepEqual(loadSettings(cwd).rootPolicy, DEFAULT_ROOT_POLICY, 'non-object rootPolicy -> built-in defaults');
 
 	// --- autoIndex: activation semantics -------------------------------------
 	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, defaultLimit: 7, autoIndex: false }));

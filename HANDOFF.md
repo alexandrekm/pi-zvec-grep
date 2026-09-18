@@ -331,3 +331,47 @@ Then in any project: `/zg index` once, and `zvec_search` is available to the mod
   pi loader `getAliases()`); tests instead resolve via in-repo devDeps.
 - `execute(toolCallId, params, signal, onUpdate, ctx)` — ctx (5th arg) carries `cwd`;
   commands get ctx as 2nd arg of the handler.
+
+---
+
+# Fork notes — alexandrekm (2026-09-18), v0.4.0
+
+Upstream: MikkelKappelPersson/pi-zvec-grep @ db7b42d (v0.3.1). This fork carries
+adoption-fix work from the impulso-pi investigation
+(`investigation/ZVEC-ADOPTION-REVIEW.md` — verdict: keep + fix):
+
+1. **`zvec_search.query` is now REQUIRED.** The one organic adoption call in
+   the wild (GLM-5.3, 2026-09-17) passed only `{limit, root}` — every query
+   field was optional, the call failed validation, the model fell back to
+   bash grep and never touched zvec again. A required single `query` string
+   makes that failure mode unrepresentable. `queries`/`fts`/`vector` stay as
+   optional advanced groups; `buildQueryArgs` still rejects empty/whitespace
+   query sets as a belt-and-braces guard for direct callers.
+2. **Root policy** (`src/core/root-policy.ts`, config field `rootPolicy`):
+   `$HOME` and umbrella roots (≥ `maxNestedRepos`, default 3, nested git
+   repos at depth ≤ 2 — dir OR file `.git`) are refused by the `zvec_index`
+   tool and skipped (with an info notice) by the auto-index hook. Empirical
+   basis: zg 0.2.x cannot index nested repos at all (`--no-ignore`, explicit
+   globs: all ignored) — an umbrella index is a near-empty stub that shadows
+   real leaf-repo indexes for every session below it (observed: a 4.1 GB
+   `~/code` index, corrupt after concurrent builds, and a 4-file
+   mtv-inference umbrella index shadowing submodule sessions). `allowRoots`
+   (realpath/`~` matched) is the escape hatch; it never unlocks `$HOME`.
+   The `/zg` command stays unguarded — a human typing it is explicit intent.
+3. **Cross-process auto-index lock** (`acquireAutoIndexLock` in
+   `src/core/workspace.ts`): `<root>/.zvec-grep/locks/autoindex.lock`, `wx`
+   open, stale after 10 min. The in-process in-flight set cannot stop two
+   pi sessions racing `zg index` on the same root — that race is the
+   observed corruption mechanism above.
+4. **Sharper prompt routing**: the guideline now reads as a rule evaluated
+   *before* grep/find ("Before using grep or find for a 'where is / how
+   does / who calls' question, try zvec_search first…"), and the tool
+   description says `query` is required.
+5. Drive-by fixes: `normalizeRoot` now expands `~`/`~/…` roots (models paste
+   them; previously `~` resolved to `<cwd>/~`); test suite green on macOS
+   (realpath expectations for the fake-zg child cwd, a racy 100 ms wait
+   replaced with polling, plus the new `rootpolicy:test` suite).
+
+Publishing note: the tag-triggered `publish.yml` targets the upstream npm
+org; this fork is consumed via `git:` pi packages (impulso-pi profiles),
+not npm. Upstream PR for (1)–(4) is desirable once validated in daily use.

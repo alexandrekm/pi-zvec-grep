@@ -62,6 +62,7 @@ One slash command, `/zg`, dispatches on a subcommand. All take an optional `[pat
 - **Settings scope** (`user` \| `project`): where the menu reads its values from and writes its edits to — per workspace, never machine-wide. Activation is the boolean `projectScope` flag inside the project file: a repo can only ever change the settings of its own workspace. Picking `project` saves the project file (creating it if missing, `Config created at …` on first creation) with `projectScope: true` plus the values — a dormant file's parked values win over your user values, so activating a team file never overwrites it. Picking `user` sets `projectScope: false` — stored values stay dormant, the file is never deleted, and this workspace's user values apply again.
 - **Default search limit** (1–50): the `--limit` used by `zvec_search` when the tool call passes no explicit `limit`. An explicit tool-call limit always wins.
 - **Auto index on start** (off by default): on every `session_start`, the hook runs `zg status --check-ready` in the working directory and, when the index is missing or stale, builds/updates it in the background (fire-and-forget; never blocks startup or the lifecycle hook). Healthy indices cost one fast guard call per start; only a missing/stale index triggers a build. Enabled in the user file for all workspaces, or in the project file for one workspace. The first build can take a while and may download the local embedding model — hence off by default.
+- **Root policy** (`rootPolicy`): which roots may be indexed, enforced by both the `zvec_index` tool and the auto-index hook. `$HOME` is always refused (a home-rooted index makes every later `zg` call stat the whole home tree — status/query appear to hang). An **umbrella root** — several nested git repos at depth ≤ 2 (an umbrella repo with submodules, or a directory of repos like `~/code`) — is refused too, because zg 0.2.x hard-skips nested repos when indexing (even `--no-ignore` and explicit globs cannot include them): the resulting index holds only the handful of root-level files, and that stub *shadows* real leaf-repo indexes for every session below it (zg resolves the nearest ancestor index). Search still works there via `fts`/`--rg` without an index. `allowRoots` is the explicit escape hatch (realpath- and `~`-matched); `maxNestedRepos` (default 3) is the umbrella threshold — a repo with one or two submodules still indexes normally. The `/zg` slash command is deliberately unguarded: a human typing it is explicit intent.
 
 Config files are read fresh on every use (mtime-cached), so hand edits take effect immediately.
 
@@ -76,13 +77,15 @@ Config files are read fresh on every use (mtime-cached), so hand edits take effe
 // user: ~/.pi/agent/pi-zvec-grep/config.json (values only — no scope flag)
 {
 	"defaultLimit": 7,
-	"autoIndex": false
+	"autoIndex": false,
+	"rootPolicy": { "allowRoots": [], "maxNestedRepos": 3 }
 }
 
 // project: .zvec-grep/config.json (self-contained — values + boolean flag)
 {
 	"defaultLimit": 25,
 	"autoIndex": true,
+	"rootPolicy": { "allowRoots": ["~/code/big-plain-dir"], "maxNestedRepos": 3 },
 	"projectScope": true
 }
 ```

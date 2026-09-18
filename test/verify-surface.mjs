@@ -10,6 +10,8 @@
  */
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import { realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTempDirectory, createReporter } from './helpers/test-utils.mjs';
@@ -17,6 +19,12 @@ import { createFakeZg } from './helpers/fake-zg.mjs';
 import { createFakePi, invokeTool, makeCtx } from './helpers/pi-harness.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Isolate the config layer (loadSettings reads getAgentDir()) so assertions
+// never depend on the real ~/.pi/agent/pi-zvec-grep/config.json.
+const agentHome = fs.mkdtempSync(join(os.tmpdir(), 'pi-zvec-grep-surface-agent-'));
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = join(agentHome, '.pi', 'agent');
 
 const root = createTempDirectory('pi-zvec-grep-surface-');
 const fake = createFakeZg(root);
@@ -67,7 +75,7 @@ check(Array.isArray(search.promptGuidelines) && search.promptGuidelines.length >
 
 // --- schemas ------------------------------------------------------------------
 const prop = (t, name) => t.parameters.properties[name];
-check(prop(search, 'query')?.type === 'string', 'search.query is string (optional)');
+check(prop(search, 'query')?.type === 'string', 'search.query is string');
 check(prop(search, 'query') === undefined || !Object.prototype.hasOwnProperty.call(prop(search, 'query'), 'default'), 'search.query has no default');
 for (const field of ['queries', 'fts', 'vector', 'globs', 'fileTypes', 'excludedFileTypes', 'symbolTypes']) {
 	const p = prop(search, field);
@@ -77,7 +85,7 @@ check(prop(search, 'fuse')?.type === 'boolean', 'search.fuse is boolean');
 check(prop(search, 'limit')?.type === 'number', 'search.limit is number');
 check(prop(search, 'limit')?.maximum === 50, 'search.limit capped at 50');
 check(prop(search, 'root')?.type === 'string', 'search.root is optional string');
-check(!(Array.isArray(search.parameters.required) && search.parameters.required.length > 0), 'search has no required fields (any query group suffices)');
+check(Array.isArray(search.parameters.required) && search.parameters.required.includes('query'), 'search.query is REQUIRED — the empty-call failure mode (a model passing only limit/root) is unrepresentable');
 
 check(prop(indexTool, 'root')?.type === 'string', 'index.root is string');
 check(Array.isArray(indexTool.parameters.required) && indexTool.parameters.required.includes('root'), 'index.root is required');
@@ -111,7 +119,7 @@ check(qState.args.includes('--fuse'), 'fuse flag');
 check(qState.args.includes('--limit') && qState.args[qState.args.indexOf('--limit') + 1] === '3', 'limit flag');
 check(qState.args.includes('-t') && qState.args[qState.args.indexOf('-t') + 1] === 'ts', 'type filter');
 check(qState.args.includes('-g') && qState.args[qState.args.indexOf('-g') + 1] === '!src/generated/**', 'glob filter');
-const expectedSub = join(ws, 'sub');
+const expectedSub = realpathSync(join(ws, 'sub'));
 check(qState.cwd === expectedSub, 'search cwd resolved relative to ctx.cwd', qState.cwd);
 
 // default limit 7 when omitted; root omitted → ctx.cwd
@@ -119,7 +127,7 @@ await invokeTool(calls, 'zvec_search', { queries: ['auth flow'] }, makeCtx({ cwd
 qState = fake.readState('query');
 check(qState.args.includes('--hybrid') && qState.args[qState.args.indexOf('--hybrid') + 1] === 'auth flow', 'queries → --hybrid');
 check(qState.args[qState.args.indexOf('--limit') + 1] === '7', 'default limit 7');
-check(qState.cwd === ws, 'search cwd falls back to ctx.cwd when root omitted', qState.cwd);
+check(qState.cwd === realpathSync(ws), 'search cwd falls back to ctx.cwd when root omitted', qState.cwd);
 
 // error path: fake zg in missing-index mode → tool throws (isError for the model)
 process.env.ZFAKE_MODE = 'missing-index';
@@ -157,12 +165,48 @@ check(iState.args.filter((a) => a === '-g').length === 2, 'two glob filters');
 check(iState.args.includes('-t') && iState.args[iState.args.indexOf('-t') + 1] === 'py', 'index type filter');
 check(iState.args.includes('-T') && iState.args[iState.args.indexOf('-T') + 1] === 'svg', 'index excluded type');
 check(iState.args.includes('--hidden'), 'hidden flag');
-check(iState.cwd === join(ws, 'proj'), 'index cwd is the workspace root', iState.cwd);
+check(iState.cwd === realpathSync(join(ws, 'proj')), 'index cwd is the workspace root', iState.cwd);
 
 // drop always passes --yes (non-interactive surface)
 await invokeTool(calls, 'zvec_index', { root: 'proj', mode: 'drop' }, makeCtx({ cwd: ws }));
 const dState = fake.readState('index');
 check(dState.args.includes('--drop') && dState.args.includes('--yes'), 'drop uses --drop --yes');
+
+// --- root policy: zvec_index refuses $HOME and umbrella roots -------------
+// umbrella fixture: a root whose children are three nested git repos
+const umbrella = join(ws, 'umbrella');
+for (const n of ['a', 'b', 'c']) fs.mkdirSync(join(umbrella, n, '.git'), { recursive: true });
+fs.writeFileSync(join(umbrella, 'README.md'), 'root-level file only\n');
+
+let policyError = '';
+try {
+	await invokeTool(calls, 'zvec_index', { root: 'umbrella' }, makeCtx({ cwd: ws }));
+} catch (error) {
+	policyError = String(error.message);
+}
+check(policyError.includes('blocked') && policyError.includes('umbrella'), 'zvec_index on an umbrella root throws with the reason', policyError.split('\n')[0]);
+
+let homeError = '';
+try {
+	await invokeTool(calls, 'zvec_index', { root: '~' }, makeCtx({ cwd: ws }));
+} catch (error) {
+	homeError = String(error.message);
+}
+check(homeError.includes('blocked') && /HOME/.test(homeError), 'zvec_index on $HOME throws', homeError.split('\n')[0]);
+
+// allowRoots escape hatch: allowlisted umbrella root indexes normally
+fs.mkdirSync(join(agentHome, '.pi', 'agent', 'pi-zvec-grep'), { recursive: true });
+fs.writeFileSync(
+	join(agentHome, '.pi', 'agent', 'pi-zvec-grep', 'config.json'),
+	JSON.stringify({ rootPolicy: { allowRoots: [umbrella], maxNestedRepos: 3 } }),
+);
+await invokeTool(calls, 'zvec_index', { root: 'umbrella' }, makeCtx({ cwd: ws }));
+check(fake.readState('index')?.args[0] === umbrella, 'allowRoots: the umbrella root indexes when explicitly allowed');
+fs.rmSync(join(agentHome, '.pi', 'agent', 'pi-zvec-grep', 'config.json'), { force: true });
+
+// drop is never policy-blocked (dropping a bad index IS the remediation)
+await invokeTool(calls, 'zvec_index', { root: 'umbrella', mode: 'drop' }, makeCtx({ cwd: ws }));
+check(fake.readState('index')?.args.includes('--drop'), 'drop on an umbrella root passes through');
 
 // index timeout is the long one
 check(calls.exec.some((c) => c.args[0] === 'index' && c.options?.timeout === 600_000), 'index uses the 10-minute timeout');
@@ -196,10 +240,10 @@ check(!cmdState.args.includes('--rebuild') && !cmdState.args.includes('--drop'),
 
 await invokeCommand('zg', 'status proj', ws);
 let sState = fake.readState('status');
-check(sState?.cwd === join(ws, 'proj'), '/zg status <path> pins cwd to the path');
+check(sState?.cwd === realpathSync(join(ws, 'proj')), '/zg status <path> pins cwd to the path');
 
 await invokeCommand('zg', 'index proj', ws);
-check(fake.readState('index')?.cwd === join(ws, 'proj'), '/zg index <path> indexes the named workspace');
+check(fake.readState('index')?.cwd === realpathSync(join(ws, 'proj')), '/zg index <path> indexes the named workspace');
 
 // rebuild/drop are subcommands of /zg too
 await invokeCommand('zg', 'rebuild proj', ws);
@@ -245,5 +289,8 @@ check(calls.exec.length === 0, '/zg settings does not run zg');
 // dropped legacy aliases: /zg-index and /zg-status are gone
 check(!calls.commands.some((c) => c.name === 'zg-index'), '/zg-index is not registered');
 check(!calls.commands.some((c) => c.name === 'zg-status'), '/zg-status is not registered');
+
+process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+fs.rmSync(agentHome, { recursive: true, force: true });
 
 done();

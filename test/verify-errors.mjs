@@ -7,6 +7,7 @@
  * error-shaping contract: zg failures carry stderr into the thrown message so
  * the model sees zg's structured Code:/hint: block.
  */
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { normalizeRoot, clip } from '../src/core/workspace.ts';
 import { createTempDirectory, createReporter } from './helpers/test-utils.mjs';
@@ -21,6 +22,9 @@ check(normalizeRoot('   ', ws) === ws, 'whitespace root → cwd');
 check(normalizeRoot('sub/dir', ws) === path.resolve(ws, 'sub/dir'), 'relative root resolves against cwd');
 check(normalizeRoot('/abs/root', ws) === '/abs/root', 'absolute root passes through');
 check(normalizeRoot('@sub/x', ws) === path.resolve(ws, 'sub/x'), 'leading @ stripped (model path convention)');
+check(normalizeRoot('~', ws) === os.homedir(), 'bare ~ expands to the home directory');
+check(normalizeRoot('~/proj', ws) === path.resolve(os.homedir(), 'proj'), '~/proj expands under the home directory');
+check(normalizeRoot('~other/x', ws) === path.resolve(ws, '~other/x'), 'only the bare ~ prefix expands (~other is a literal)');
 
 // clip
 check(clip('short') === 'short', 'short text unchanged');

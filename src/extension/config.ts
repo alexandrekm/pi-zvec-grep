@@ -28,13 +28,16 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
+import { DEFAULT_ROOT_POLICY, type RootPolicy } from '../core/root-policy.ts';
+
+export { DEFAULT_ROOT_POLICY };
 
 /**
  * Persistent VALUE fields — both layers store them in full. The user file
  * holds ONLY these fields; the project file holds these fields plus the
  * boolean `projectScope` activation flag.
  */
-const OVERRIDABLE_FIELDS = ['defaultLimit', 'autoIndex'] as const;
+const OVERRIDABLE_FIELDS = ['defaultLimit', 'autoIndex', 'rootPolicy'] as const;
 type OverridableField = (typeof OVERRIDABLE_FIELDS)[number];
 
 /** The persistable value fields of the settings object. */
@@ -57,12 +60,20 @@ export interface ZvecGrepSettings {
 	 * take a while and may download the local embedding model.
 	 */
 	autoIndex: boolean;
+	/**
+	 * Which roots autoIndex and the zvec_index tool may index: $HOME and
+	 * umbrella roots (several nested git repos at depth ≤ 2, which zg cannot
+	 * index) are blocked; `allowRoots` is the escape hatch. See
+	 * src/core/root-policy.ts for the rationale.
+	 */
+	rootPolicy: RootPolicy;
 }
 
 export const DEFAULT_SETTINGS: ZvecGrepSettings = {
 	projectScope: false,
 	defaultLimit: 7,
 	autoIndex: false,
+	rootPolicy: DEFAULT_ROOT_POLICY,
 };
 
 export function userConfigFile(): string {
@@ -99,7 +110,27 @@ function validField(field: OverridableField, raw: Record<string, unknown>): unkn
 			return typeof raw[field] === 'number' ? validDefaultLimit(raw[field]) : undefined;
 		case 'autoIndex':
 			return typeof raw[field] === 'boolean' ? raw[field] : undefined;
+		case 'rootPolicy':
+			return validRootPolicy(raw[field]);
 	}
+}
+
+/**
+ * Validate a raw `rootPolicy` value: an object whose `allowRoots` is a
+ * string array and `maxNestedRepos` a positive integer; missing sub-keys
+ * fall back to the built-in defaults. Anything else → undefined (the
+ * layer below applies).
+ */
+function validRootPolicy(raw: unknown): RootPolicy | undefined {
+	if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
+	const record = raw as Record<string, unknown>;
+	const allowRoots = Array.isArray(record.allowRoots)
+		? record.allowRoots.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+		: DEFAULT_ROOT_POLICY.allowRoots;
+	const maxRaw = record.maxNestedRepos;
+	const maxNestedRepos =
+		typeof maxRaw === 'number' && Number.isFinite(maxRaw) && maxRaw >= 1 ? Math.round(maxRaw) : DEFAULT_ROOT_POLICY.maxNestedRepos;
+	return { allowRoots, maxNestedRepos };
 }
 
 /**

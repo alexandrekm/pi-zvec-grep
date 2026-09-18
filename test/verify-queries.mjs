@@ -83,7 +83,14 @@ try {
 } catch (error) {
 	threw = String(error.message);
 }
-check(threw.includes('at least one of'), 'empty query set rejected with clear message', threw);
+check(threw.includes('non-empty'), 'empty query set rejected with clear message', threw);
+threw = '';
+try {
+	buildQueryArgs({ query: '   ' });
+} catch (error) {
+	threw = String(error.message);
+}
+check(threw.includes('non-empty'), 'whitespace-only query rejected too', threw);
 
 // vectors-only search is a valid route (no positional query needed)
 args = argsOf({ vector: ['meaning-only'] });

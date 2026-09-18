@@ -1,6 +1,6 @@
 {
   "name": "@luminascale/pi-zvec-grep",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "description": "🔍 zvec-grep's local-first hybrid (semantic + exact) search as native pi tools",
   "license": "Apache-2.0",
@@ -51,8 +51,9 @@
     "errors:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-errors.mjs",
     "settings:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-settings.mjs",
     "autoindex:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-autoindex.mjs",
+		"rootpolicy:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-root-policy.mjs",
     "format:test": "node --experimental-strip-types --disable-warning=ExperimentalWarning test/verify-format.mjs",
-    "test": "npm run cli:test && npm run surface:test && npm run queries:test && npm run indexing:test && npm run errors:test && npm run settings:test && npm run autoindex:test && npm run format:test"
+    "test": "npm run cli:test && npm run surface:test && npm run queries:test && npm run indexing:test && npm run errors:test && npm run settings:test && npm run autoindex:test && npm run rootpolicy:test && npm run format:test"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

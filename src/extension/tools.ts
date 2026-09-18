@@ -20,13 +20,14 @@ import {
 	type ZgSearchSummary,
 	type ZgStatusVerdict,
 } from '../core/format.ts';
-import { clip, normalizeRoot } from '../core/workspace.ts';
+import { acquireAutoIndexLock, clip, normalizeRoot, type AutoIndexLock } from '../core/workspace.ts';
 import { openSettings } from './settings-ui.ts';
 import {
 	createZgRunner,
 	ZG_INDEX_TIMEOUT_MS,
 	ZG_STATUS_TIMEOUT_MS,
 } from '../core/zg.ts';
+import { assessRoot } from '../core/root-policy.ts';
 
 /**
  * Routing guidance baked into tool descriptions: zg is the semantic/layered
@@ -35,10 +36,10 @@ import {
  */
 const SEARCH_GUIDANCE =
 	'For exact strings, regex, filenames, counts, file lists, or anything piped, use bash rg instead. ' +
-	'Requires a workspace index (zvec_index tool or /zg index); zg reports a clear hint when one is missing.';
+	'Without a workspace index only fts (managed ripgrep) can still match; zg reports a clear hint when an index is missing.';
 
 const searchParams = Type.Object({
-	query: Type.Optional(Type.String({ description: 'One hybrid natural-language or exact query — the usual way to call this tool' })),
+	query: Type.String({ description: 'The search query — one natural-language or exact phrase (required). Pass the question you are answering, e.g. "where is request routing configured"' }),
 	queries: Type.Optional(Type.Array(Type.String(), { description: 'Explicit hybrid query groups' })),
 	fts: Type.Optional(Type.Array(Type.String(), { description: 'Ranked lexical constraints (identifiers, exact phrases); not an exhaustive occurrence lookup' })),
 	vector: Type.Optional(Type.Array(Type.String(), { description: 'Semantic-only query groups' })),
@@ -177,10 +178,12 @@ export function registerZvecTools(pi: ExtensionAPI): void {
 			'Hybrid semantic + keyword search over a locally indexed workspace (zvec-grep). ' +
 			'Use it when the answer is grounded in local files and the wording or location is unknown: ' +
 			'fuzzy concepts, relationships, call chains, cross-file synthesis, "where is X handled", design-rationale questions. ' +
+			'Call it with the required `query` parameter — a natural-language phrase describing what you are looking for. ' +
 			`Returns ranked hits with file, line range, symbols, and matching source. ${SEARCH_GUIDANCE}`,
 		promptSnippet: 'Semantic + exact hybrid search over the indexed workspace (local zvec-grep)',
 		promptGuidelines: [
-			'Use zvec_search for meaning-based or location-unknown workspace questions; keep bash grep for exact strings, regex, counts, and file lists.',
+			'Before using grep or find for a "where is / how does / who calls" question, try zvec_search first with a natural-language query; ' +
+			'keep bash grep for exact strings, regex, counts, and file lists.',
 		],
 		parameters: searchParams,
 		async execute(_toolCallId: string, params: SearchToolInput, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: ExtensionContext) {
@@ -249,6 +252,17 @@ export function registerZvecTools(pi: ExtensionAPI): void {
 		parameters: indexParams,
 		async execute(_toolCallId: string, params: ZvecIndexParams, signal: AbortSignal | undefined, onUpdate: unknown, ctx: ExtensionContext) {
 			const resolvedRoot = normalizeRoot(params.root, ctx.cwd);
+			// Root policy (see src/core/root-policy.ts): $HOME and umbrella roots
+			// (several nested git repos, which zg cannot index) are rejected before
+			// any zg call — with the reason and the allowRoots escape hatch spelled
+			// out for the model. `drop` stays open: dropping a bad index is the
+			// remediation, never the problem.
+			if ((params.mode ?? 'index') !== 'drop') {
+				const assessment = assessRoot(resolvedRoot, loadSettings(ctx.cwd).rootPolicy);
+				if (!assessment.allowed) {
+					throw new Error(`zvec_index blocked for ${resolvedRoot}: ${assessment.reason}`);
+				}
+			}
 			const args = buildIndexArgs(params, resolvedRoot);
 			(onUpdate as ((u: { content: Array<{ type: string; text: string }> }) => void) | undefined)?.({
 				content: [{ type: 'text', text: `${params.mode ?? 'index'}ing ${resolvedRoot}…` }],
@@ -497,14 +511,25 @@ export function registerAutoIndex(pi: ExtensionAPI): void {
 	};
 	pi.on('session_start', (_event, ctx) => {
 		const cwd = ctx.cwd;
-		if (!loadSettings(cwd).autoIndex) return;
+		const settings = loadSettings(cwd);
+		if (!settings.autoIndex) return;
 		const root = normalizeRoot(undefined, cwd);
 		if (inflight.has(root)) return;
 		inflight.add(root);
 		void (async () => {
+			let lock: AutoIndexLock | undefined;
 			try {
 				const check = await pi.exec('zg', ['status', '--check-ready'], { cwd: root, timeout: ZG_STATUS_TIMEOUT_MS });
 				if (check.code === 0) return; // index ready: nothing to do
+				const assessment = assessRoot(root, settings.rootPolicy);
+				if (!assessment.allowed) {
+					// Only notified when a build would actually have happened (the
+					// status guard failed), so healthy sessions never see noise.
+					notify(ctx, `zvec: auto index skipped for ${root} — ${assessment.reason}`, 'info');
+					return;
+				}
+				lock = acquireAutoIndexLock(root);
+				if (!lock) return; // another pi process is already building this root
 				notify(ctx, `zvec: index missing or stale — building in background…`, 'info');
 				const result = await pi.exec('zg', ['index', root], { cwd: root, timeout: ZG_INDEX_TIMEOUT_MS });
 				if (result.code !== 0) {
@@ -516,6 +541,7 @@ export function registerAutoIndex(pi: ExtensionAPI): void {
 			} catch {
 				notify(ctx, 'zvec: auto index failed (zg could not be run)', 'error');
 			} finally {
+				lock?.release();
 				inflight.delete(root);
 			}
 		})();

@@ -72,11 +72,16 @@ try {
 		const cwd = path.join(home, 'ready');
 		fs.mkdirSync(cwd, { recursive: true });
 		await pi.emit('session_start', { type: 'session_start', reason: 'reload' }, makeCtx({ cwd }));
-		await new Promise((r) => setTimeout(r, 100));
-		const status = fake.readState('status');
+		// Poll for the guard to land (fake-zg spawn + node startup can exceed
+		// a fixed 100 ms wait on slower machines — this was flaky at 100 ms).
+		let status;
+		for (let i = 0; i < 40 && !status; i += 1) {
+			await new Promise((r) => setTimeout(r, 50));
+			status = fake.readState('status');
+		}
 		assert.ok(status, 'autoIndex on + ready: the guard ran');
 		assert.deepEqual(status.args, ['--check-ready'], 'guard argv is `zg status --check-ready` (fake records subcommand separately)');
-		assert.equal(status.cwd, cwd, 'guard cwd is the session cwd (index root = cwd)');
+		assert.equal(status.cwd, fs.realpathSync(cwd), 'guard cwd is the session cwd (index root = cwd, realpath on macOS)');
 		assert.equal(fake.readState('index'), undefined, 'guard exit 0: no index call');
 	}
 
@@ -96,7 +101,7 @@ try {
 		const index = fake.readState('index');
 		assert.ok(index, 'guard failed: background index finally ran');
 		assert.deepEqual(index.args, [cwd], 'index argv pins the root');
-		assert.equal(index.cwd, cwd, 'index cwd is the session cwd');
+		assert.equal(index.cwd, fs.realpathSync(cwd), 'index cwd is the session cwd');
 		assert.ok(calls.exec.some((e) => e.command === 'zg' && e.args[0] === 'index' && e.args[1] === cwd && e.options?.timeout === 600_000), 'index carries the ZG_INDEX timeout');
 	}
 
@@ -151,6 +156,58 @@ try {
 		assert.equal(hookError, undefined, 'failed build must not reject the session_start emit');
 		await new Promise((r) => setTimeout(r, 300));
 		assert.ok(calls.exec.some((e) => e.args[0] === 'index' && e.args[1] === cwd), 'failure path still attempted the build');
+	}
+
+	// --- root policy: umbrella roots are never auto-indexed -------------------
+	{
+		process.env.ZFAKE_MODE = 'missing-index'; // status guard fails, build would run
+		fake.resetState();
+		const cwd = path.join(home, 'umbrella');
+		fs.mkdirSync(cwd, { recursive: true });
+		for (const n of ['a', 'b', 'c']) fs.mkdirSync(path.join(cwd, n, '.git'), { recursive: true });
+		const notices = [];
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd, ui: { notify: (m, t) => notices.push({ m, t }) } }));
+		await new Promise((r) => setTimeout(r, 300));
+		assert.ok(fake.readState('status'), 'the status guard still ran (skip only applies to the build)');
+		assert.equal(fake.readState('index'), undefined, 'umbrella root: no index call');
+		assert.ok(
+			notices.some((n) => n.t === 'info' && /skipped/.test(n.m) && /umbrella/.test(n.m)),
+			'skip notice explains the umbrella reason',
+			notices.map((n) => n.m).join(' | '),
+		);
+	}
+
+	// --- root policy: allowRoots re-enables one specific root -----------------
+	{
+		fs.writeFileSync(
+			userConfigFile(),
+			JSON.stringify({ ...DEFAULT_SETTINGS, autoIndex: true, rootPolicy: { allowRoots: [path.join(home, 'umbrella')], maxNestedRepos: 3 } }),
+		);
+		fake.resetState();
+		const cwd = path.join(home, 'umbrella');
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
+		await new Promise((r) => setTimeout(r, 300));
+		assert.ok(fake.readState('index'), 'allowRoots: the umbrella root builds when explicitly allowlisted');
+		fs.writeFileSync(userConfigFile(), JSON.stringify({ ...DEFAULT_SETTINGS, autoIndex: true }));
+	}
+
+	// --- cross-process lock: a held lockfile suppresses the build ------------
+	{
+		fake.resetState();
+		const cwd = path.join(home, 'locked');
+		fs.mkdirSync(path.join(cwd, '.zvec-grep', 'locks'), { recursive: true });
+		fs.writeFileSync(path.join(cwd, '.zvec-grep', 'locks', 'autoindex.lock'), 'other-pid\n');
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
+		await new Promise((r) => setTimeout(r, 300));
+		assert.ok(fake.readState('status'), 'guard ran under a foreign lock');
+		assert.equal(fake.readState('index'), undefined, 'lock held by another process: no build');
+		// stale lock (backdated 11 min) is stolen and the build proceeds
+		const stale = path.join(cwd, '.zvec-grep', 'locks', 'autoindex.lock');
+		const old = new Date(Date.now() - 11 * 60_000);
+		fs.utimesSync(stale, old, old);
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
+		await new Promise((r) => setTimeout(r, 300));
+		assert.ok(fake.readState('index'), 'stale lock stolen: build proceeds');
 	}
 
 	console.log('All auto-index assertions passed.');

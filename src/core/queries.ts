@@ -25,8 +25,9 @@ export interface ZvecSearchQueryParams {
  */
 export function buildQueryArgs(params: ZvecSearchQueryParams, options?: { limit?: number }): string[] {
 	const args: string[] = ['query'];
-	if (!params.query && !params.queries?.length && !params.fts?.length && !params.vector?.length) {
-		throw new Error('zvec_search needs at least one of: query, queries, fts, or vector');
+	const hasQuery = (v: string | undefined): boolean => Boolean(v && v.trim().length > 0);
+	if (!hasQuery(params.query) && !params.queries?.length && !params.fts?.length && !params.vector?.length) {
+		throw new Error('zvec_search needs a non-empty `query` (a natural-language or exact phrase)');
 	}
 	if (params.query) args.push(params.query);
 	for (const q of params.queries ?? []) args.push('--hybrid', q);
