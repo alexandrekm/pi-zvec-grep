@@ -23,14 +23,25 @@ const [cmd, ...rest] = process.argv.slice(2);
 const record = (name) => {
   if (!stateDir) return;
   fs.mkdirSync(stateDir, { recursive: true });
-  fs.writeFileSync(path.join(stateDir, name + '.json'), JSON.stringify({ cwd: process.cwd(), args: rest }));
+  const entry = { cwd: process.cwd(), args: rest };
+  fs.writeFileSync(path.join(stateDir, name + '.json'), JSON.stringify(entry));
+  // append log (multiple invocations with different cwds — fan-out tests)
+  fs.appendFileSync(path.join(stateDir, name + '-log.jsonl'), JSON.stringify(entry) + '\\n');
 };
 if (cmd === 'query') {
-  if (process.env.ZFAKE_MODE === 'missing-index') {
+  // 'fanout' mode: fail with the no-index error ONLY where no index lives
+  // (<cwd>/.zvec-grep/manifest.json absent) — umbrella roots fail, their
+  // indexed submodule children succeed.
+  const noIndexHere = !fs.existsSync(path.join(process.cwd(), '.zvec-grep', 'manifest.json'));
+  record('query'); // failures too — fan-out tests count the failed root query
+  if (process.env.ZFAKE_MODE === 'missing-index' || (process.env.ZFAKE_MODE === 'fanout' && noIndexHere)) {
     process.stderr.write('Error: No zvec-grep index found for this workspace\\nCode: ZVEC_GREP.ENGINE.SERVICE.WORKSPACE_INDEX_NOT_FOUND\\n');
     process.exit(1);
   }
-  record('query');
+  if (process.env.ZFAKE_MODE === 'fanout') {
+    console.log('query groups (1):\\nQ1 [primary]: fanout\\nhits: 1\\n\\n#1 matchedBy=fts+vector ' + path.basename(process.cwd()) + '/hit.ts:1-2\\n1\\tfake hit in ' + path.basename(process.cwd()));
+    process.exit(0);
+  }
   console.log('FAKE-QUERY args: ' + rest.join(' '));
 } else if (cmd === 'index') {
   if (process.env.ZFAKE_MODE === 'stale-slow') {
@@ -70,10 +81,15 @@ export function createFakeZg(root) {
 			const file = path.join(stateDir, `${name}.json`);
 			return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : undefined;
 		},
+		readLog: (name) => {
+			const file = path.join(stateDir, `${name}-log.jsonl`);
+			if (!fs.existsSync(file)) return [];
+			return fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+		},
 		resetState: () => {
 			if (!fs.existsSync(stateDir)) return;
 			for (const f of fs.readdirSync(stateDir)) {
-				if (f.endsWith('.json')) fs.rmSync(path.join(stateDir, f));
+				if (/\.jsonl?$/.test(f)) fs.rmSync(path.join(stateDir, f));
 			}
 		},
 		clean: () => fs.rmSync(binDir, { recursive: true, force: true }),

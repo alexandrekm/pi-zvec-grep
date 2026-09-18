@@ -414,3 +414,39 @@ that shaped this round, all verified empirically:
 Tests: `seed:test` suite added; `autoindex:test` rewritten for the new flow
 (repo-subdir resolution, seeding + never-write-back argv, anti-shadowing,
 policy-first-when-missing). 10 suites green.
+
+---
+
+# Fork notes addendum — round 3 (2026-09-18): umbrella fan-out
+
+The user's actual unit of work: a session AT the umbrella root ("mtv-inference
+is just a slim repo; the code lives in the subfolders; I run at the root so
+changes and searches span multiple repos"). Rounds 1-2 left such sessions
+with fts/rg only. Round 3 closes the gap without violating the ancestor
+shadowing rule:
+
+1. **autoIndex at an umbrella root indexes the submodules**: when the
+   resolved root is an umbrella (assessRoot kind 'umbrella'), the hook
+   fire-and-forget builds/seeds every depth-1 nested repo that lacks an
+   index (sequential, per-child locks, ≤40, seeded from the main
+   checkout's submodule bases via the new plain-submodule gitdir pattern
+   `<main>/.git/modules/<sub>` → `<main>/<sub>`). The root itself stays
+   un-indexed. Silent when everything is indexed.
+2. **zvec_search fans out**: when the query at the root fails with
+   WORKSPACE_INDEX_NOT_FOUND (no own index, no ancestor), the tool runs
+   the query inside every depth-1 nested repo that has an index
+   (≤40, concurrency 5, ≤5 hits per repo) and merges the outputs under
+   `── <repo> ──` headers with a summed summary. One call from the
+   umbrella root searches every repo under it.
+3. `RootAssessment.kind` ('home' | 'umbrella') lets the hook branch
+   without string-matching reasons.
+
+E2E verified with real zg: slim umbrella + 3 submodule repos, session at
+the root → 3 child indexes built, root un-indexed, one zvec_search call
+returns ranked hits from multiple repos with per-repo headers.
+
+Tests: fake-zg gained a 'fanout' mode (per-cwd no-index failure), an
+append-log recorder, and resetState now clears .jsonl logs; surface suite
+covers the fan-out merge; autoindex suite covers submodule indexing and
+the healthy-silent path; seed suite covers the submodule gitfile shape.
+10 suites green.

@@ -43,9 +43,12 @@ export const DEFAULT_ROOT_POLICY: RootPolicy = {
 	maxNestedRepos: 3,
 };
 
-/** Verdict for one candidate root. `reason` is set iff `allowed` is false. */
+/** Verdict for one candidate root. `reason` is set iff `allowed` is false;
+ * `kind` names the blocking rule (callers branch on it: umbrella roots get
+ * the submodule fan-out instead of a plain refusal). */
 export interface RootAssessment {
 	allowed: boolean;
+	kind?: 'home' | 'umbrella';
 	reason?: string;
 }
 
@@ -149,6 +152,28 @@ export function enclosingGitRoot(dir: string): string | undefined {
 }
 
 /**
+ * The depth-1 nested git repos under a root (submodule-style children),
+ * capped — used by the umbrella fan-out paths (autoIndex builds them,
+ * zvec_search searches them). Pure fs.
+ */
+export function nestedRepoRoots(root: string, cap = 40): string[] {
+	const out: string[] = [];
+	let children: fs.Dirent[];
+	try {
+		children = fs.readdirSync(root, { withFileTypes: true });
+	} catch {
+		return out;
+	}
+	for (const child of children) {
+		if (!child.isDirectory() || SCAN_SKIP.has(child.name)) continue;
+		const childPath = path.join(root, child.name);
+		if (isGitDir(childPath)) out.push(childPath);
+		if (out.length >= cap) return out;
+	}
+	return out;
+}
+
+/**
  * Assess one candidate index root against the policy. Pure: no zg calls, no
  * writes. The home comparison and `allowRoots` matching are realpath-based
  * so `~`, symlinks, and trailing differences cannot sneak a root through.
@@ -159,6 +184,7 @@ export function assessRoot(root: string, policy: RootPolicy = DEFAULT_ROOT_POLIC
 	if (realRoot === realHome) {
 		return {
 			allowed: false,
+			kind: 'home',
 			reason:
 				'root is $HOME: a home-rooted index makes every zg call stat the entire home tree ' +
 				'(status/query appear to hang for minutes); this exact failure disabled zvec once before',
@@ -172,6 +198,7 @@ export function assessRoot(root: string, policy: RootPolicy = DEFAULT_ROOT_POLIC
 	if (nested >= threshold) {
 		return {
 			allowed: false,
+			kind: 'umbrella',
 			reason:
 				`root holds ${nested}+ nested git repos at depth ≤ 2 (an umbrella/container root). ` +
 				'zg cannot index nested-repo content (only root-level files would be indexed), and worse: ' +

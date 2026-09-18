@@ -28,8 +28,8 @@ import {
 	ZG_STATUS_TIMEOUT_MS,
 } from '../core/zg.ts';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { assessRoot, enclosingGitRoot } from '../core/root-policy.ts';
+import { basename, join } from 'node:path';
+import { assessRoot, enclosingGitRoot, nestedRepoRoots, type RootAssessment, type RootPolicy } from '../core/root-policy.ts';
 import { seedWorktreeIndex } from '../core/seed.ts';
 
 /**
@@ -170,6 +170,81 @@ function styledIndexOutput(raw: string, theme: ThemeFg): string {
 export type SearchToolInput = ZvecSearchQueryParams & { root?: string };
 export type StatusToolInput = { root?: string };
 
+/** zg's structured no-index error code — the fan-out trigger. */
+const NO_INDEX_ERROR = 'WORKSPACE_INDEX_NOT_FOUND';
+
+/** Max submodule repos a single fan-out searches / indexes. */
+const MAX_NESTED_REPOS = 40;
+
+/** Concurrent zg queries during a fan-out (each loads the embedding model). */
+const FANOUT_CONCURRENCY = 5;
+
+/** Hits shown per submodule repo in a fan-out (the merge caps total noise). */
+const FANOUT_PER_CHILD_LIMIT = 5;
+
+type ZgRunner = ReturnType<typeof createZgRunner>;
+
+/**
+ * Umbrella fan-out: run the query inside every depth-1 nested repo that
+ * has an index, and merge the outputs under per-repo headers. Returns
+ * undefined when no nested repo is indexed (the caller then surfaces zg's
+ * original no-index error). This is what makes a session at an umbrella
+ * root (a slim superproject whose code lives in submodules) able to
+ * search every repo under it with one call — an index at the umbrella
+ * root itself is impossible by design (zg skips nested repos, and an
+ * ancestor index would lock out the repos below).
+ */
+async function searchNestedRepos(
+	root: string,
+	params: SearchToolInput,
+	effectiveLimit: number,
+	runZg: ZgRunner,
+	signal: AbortSignal | undefined,
+): Promise<{ content: Array<{ type: 'text'; text: string }>; details: { summary?: ZgSearchSummary } } | undefined> {
+	const nested = nestedRepoRoots(root, MAX_NESTED_REPOS);
+	const children = nested.filter((child) => existsSync(join(child, '.zvec-grep', 'manifest.json')));
+	if (children.length === 0) return undefined;
+	const args = buildQueryArgs({ ...params, limit: Math.min(effectiveLimit, FANOUT_PER_CHILD_LIMIT) });
+	const outputs: Array<{ name: string; text: string; summary?: ZgSearchSummary; failed?: boolean }> = [];
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const index = next;
+			next += 1;
+			if (index >= children.length) return;
+			const child = children[index];
+			const { stdout, stderr, code } = await runZg(args, { cwd: child, signal });
+			outputs.push({
+				name: basename(child),
+				text: code === 0 ? stdout : `query failed: ${(stderr || '').split('\n')[0]}`,
+				summary: code === 0 ? parseSearchOutput(stdout) : undefined,
+				failed: code !== 0,
+			});
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(FANOUT_CONCURRENCY, children.length) }, worker));
+	outputs.sort((a, b) => (b.summary?.totalHits ?? 0) - (a.summary?.totalHits ?? 0) || a.name.localeCompare(b.name));
+	const totalHits = outputs.reduce((n, o) => n + (o.summary?.totalHits ?? 0), 0);
+	const fileCount = outputs.reduce((n, o) => n + (o.summary?.fileCount ?? 0), 0);
+	const hasStale = outputs.some((o) => o.summary?.hasStale);
+	const unindexed = nested.length - children.length;
+	const header =
+		`umbrella root (no index by design — an ancestor index would lock out the repos below): ` +
+		`searched ${children.length} indexed submodule repo(s)` +
+		(unindexed > 0 ? `, ${unindexed} not indexed yet (background indexing may be in progress)` : '');
+	const sections = outputs
+		.filter((o) => (o.summary?.totalHits ?? 0) > 0 || o.failed)
+		.map((o) => `── ${o.name} ──\n${o.text}`);
+	const body = sections.length > 0 ? sections.join('\n\n') : 'no hits in any submodule repo';
+	return {
+		content: [{ type: 'text', text: clip(`${header}\n\n${body}`) }],
+		details: { summary: { groups: [], totalHits, fileCount, hasStale } },
+	};
+}
+
+export type SearchToolInput = ZvecSearchQueryParams & { root?: string };
+export type StatusToolInput = { root?: string };
+
 /** Register zvec_search / zvec_index / zvec_status. */
 export function registerZvecTools(pi: ExtensionAPI): void {
 	const runZg = createZgRunner((command, args, options) => pi.exec(command, args, options));
@@ -194,11 +269,19 @@ export function registerZvecTools(pi: ExtensionAPI): void {
 			// per-workspace config default (the project file when its
 			// projectScope flag is true, else the user file); hard cap 50.
 			const defaultLimit = Math.min(Math.max(Math.round(loadSettings(ctx.cwd).defaultLimit), 1), MAX_SEARCH_LIMIT);
-			const args = buildQueryArgs(params, {
-				limit: params.limit !== undefined ? Math.min(Math.max(Math.round(params.limit), 1), MAX_SEARCH_LIMIT) : defaultLimit,
-			});
-			const { stdout, stderr, code } = await runZg(args, { cwd: normalizeRoot(params.root, ctx.cwd), signal });
+			const effectiveLimit = params.limit !== undefined ? Math.min(Math.max(Math.round(params.limit), 1), MAX_SEARCH_LIMIT) : defaultLimit;
+			const args = buildQueryArgs(params, { limit: effectiveLimit });
+			const root = normalizeRoot(params.root, ctx.cwd);
+			const { stdout, stderr, code } = await runZg(args, { cwd: root, signal });
 			if (code !== 0) {
+				// No index at this root (and none on any ancestor): when the root
+				// is an umbrella checkout whose submodules HAVE indexes, fan the
+				// query out across them instead of failing — a session at an
+				// umbrella root can then search every repo under it with one call.
+				if (String(stderr).includes(NO_INDEX_ERROR)) {
+					const fanout = await searchNestedRepos(root, params, effectiveLimit, runZg, signal);
+					if (fanout) return fanout;
+				}
 				throw new Error(stderr || stdout || `zvec_search failed (exit ${code})`);
 			}
 			const summary = parseSearchOutput(stdout);
@@ -541,6 +624,13 @@ export function registerAutoIndex(pi: ExtensionAPI): void {
 				}
 				const assessment = assessRoot(root, settings.rootPolicy);
 				if (!assessment.allowed) {
+					if (assessment.kind === 'umbrella') {
+						// An umbrella root is never indexed itself — instead make sure
+						// its submodule repos are, so the session's zvec_search fan-out
+						// has indexes to search. Silent when everything is indexed.
+						void indexNestedRepos(pi, ctx, root, settings.rootPolicy, notify);
+						return;
+					}
 					notify(ctx, `zvec: auto index skipped for ${root} — ${assessment.reason}`, 'info');
 					return;
 				}
@@ -569,6 +659,54 @@ export function registerAutoIndex(pi: ExtensionAPI): void {
 		})();
 	});
 }
+
+/**
+ * Umbrella handling for the auto-index hook: the root itself is never
+ * indexed (see root-policy.ts), but its depth-1 submodule repos ARE — each
+ * under its own cross-process lock, seeded from the main checkout's base
+ * when one exists, sequentially in the background so N builds never storm
+ * the CPU/embedding model at once. Notifies once when there is work; silent
+ * when every submodule is already indexed.
+ */
+async function indexNestedRepos(
+	pi: ExtensionAPI,
+	ctx: { ui?: { notify?: (message: string, type?: string) => void } },
+	umbrellaRoot: string,
+	policy: RootPolicy,
+	notify: (ctx: { ui?: { notify?: (message: string, type?: string) => void } }, message: string, type: 'info' | 'error') => void,
+): Promise<void> {
+	const children = nestedRepoRoots(umbrellaRoot, MAX_NESTED_REPOS);
+	const pending = children.filter((child) => !existsSync(join(child, '.zvec-grep', 'manifest.json')));
+	if (pending.length === 0) return; // healthy: nothing to say
+	notify(
+		ctx,
+		`zvec: ${basename(umbrellaRoot)} is an umbrella root — it is not indexable itself (an index here would ` +
+		`lock out every repo below it), but its submodule repos are: indexing ${pending.length} of ` +
+		`${children.length} in the background…`,
+		'info',
+	);
+	let done = 0;
+	let failed = 0;
+	for (const child of pending) {
+		const assessment: RootAssessment = assessRoot(child, policy);
+		if (!assessment.allowed) continue; // a nested umbrella — leave it to its own sessions
+		const lock = acquireAutoIndexLock(child);
+		if (!lock) continue; // another pi process is already on this repo
+		try {
+			seedWorktreeIndex(child); // from the main checkout's submodule base, when one exists
+			const result = await pi.exec('zg', ['index', child], { cwd: child, timeout: ZG_INDEX_TIMEOUT_MS });
+			if (result.code === 0) done += 1;
+			else failed += 1;
+		} catch {
+			failed += 1;
+		} finally {
+			lock.release();
+		}
+	}
+	if (failed > 0) notify(ctx, `zvec: ${failed} of ${pending.length} submodule indexes failed`, 'error');
+	else if (done > 0) notify(ctx, `zvec: ${done} submodule index${done === 1 ? '' : 'es'} updated — zvec_search now fans out across them from the umbrella root`, 'info');
+}
+
 
 /**
  * Register the /zg command: one slash command with subcommand dispatch

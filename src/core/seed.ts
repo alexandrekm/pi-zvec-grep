@@ -23,17 +23,23 @@ import * as path from 'node:path';
 /** Skip seeding when the base index is larger than this (sanity cap). */
 export const MAX_SEED_BYTES = 2_000_000_000;
 
-/** gitfile patterns → the main checkout root that owns the worktree. */
+/** gitfile patterns → the main checkout that owns this checkout. */
 const WORKTREE_GITDIR = /^(.*)\/\.git\/worktrees\/[^/]+$/;
 const SUBMODULE_WORKTREE_GITDIR = /^(.*)\/\.git\/modules\/([^/]+)\/worktrees\/[^/]+$/;
+/** A plain submodule checkout: gitdir <main>/.git/modules/<sub> → <main>/<sub>. */
+const SUBMODULE_GITDIR = /^(.*)\/\.git\/modules\/([^/]+)$/;
 
 /**
- * The main checkout root behind a worktree root, when `root` IS a worktree
- * (its `.git` is a FILE). Handles both shapes:
+ * The main checkout behind this checkout, when `root`'s `.git` is a FILE.
+ * Handles three shapes:
  *   `<main>/.git/worktrees/<name>`            → `<main>`
  *   `<main>/.git/modules/<sub>/worktrees/<n>` → `<main>/<sub>` (a submodule's
- *   own worktree; the base index lives at the submodule checkout)
+ *     own worktree; the base index lives at the submodule checkout)
+ *   `<main>/.git/modules/<sub>`               → `<main>/<sub>` (a plain
+ *     submodule checkout — e.g. inside an umbrella worktree; seeds from the
+ *     same submodule's checkout in the main)
  * Undefined for normal repos, missing gitfiles, or unparsable contents.
+ * Callers must treat a result equal to `root` as "no separate main".
  */
 export function worktreeMainRoot(root: string): string | undefined {
 	const gitfile = path.join(root, '.git');
@@ -57,6 +63,8 @@ export function worktreeMainRoot(root: string): string | undefined {
 	if (sub) return path.join(sub[1], sub[2]);
 	const plain = gitdir.match(WORKTREE_GITDIR);
 	if (plain) return plain[1];
+	const checkout = gitdir.match(SUBMODULE_GITDIR);
+	if (checkout) return path.join(checkout[1], checkout[2]);
 	return undefined;
 }
 
@@ -77,7 +85,9 @@ export interface SeedOutcome {
 export function seedWorktreeIndex(root: string): SeedOutcome {
 	try {
 		const main = worktreeMainRoot(root);
-		if (!main) return { seeded: false, skipped: 'not a worktree' };
+		if (!main || path.resolve(main) === path.resolve(root)) {
+			return { seeded: false, skipped: 'no separate main checkout' };
+		}
 		const mainIndex = path.join(main, '.zvec-grep');
 		const mainManifest = path.join(mainIndex, 'manifest.json');
 		if (!fs.existsSync(mainManifest)) return { seeded: false, skipped: `no base index at ${main}` };

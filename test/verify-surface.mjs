@@ -172,7 +172,30 @@ await invokeTool(calls, 'zvec_index', { root: 'proj', mode: 'drop' }, makeCtx({ 
 const dState = fake.readState('index');
 check(dState.args.includes('--drop') && dState.args.includes('--yes'), 'drop uses --drop --yes');
 
-// --- root policy: zvec_index refuses $HOME and umbrella roots -------------
+// --- umbrella fan-out: no index at the root → search every indexed child ----
+process.env.ZFAKE_MODE = 'fanout';
+{
+	const umbrella = join(ws, 'fanout-umbrella');
+	for (const n of ['repoA', 'repoB']) {
+		fs.mkdirSync(join(umbrella, n, '.git'), { recursive: true });
+		fs.mkdirSync(join(umbrella, n, '.zvec-grep'), { recursive: true });
+		fs.writeFileSync(join(umbrella, n, '.zvec-grep', 'manifest.json'), JSON.stringify({ rootPaths: [] }));
+	}
+	fs.mkdirSync(join(umbrella, 'repoC', '.git'), { recursive: true }); // nested repo WITHOUT an index
+	const fanout = await invokeTool(calls, 'zvec_search', { query: 'where is it' }, makeCtx({ cwd: umbrella }));
+	const text = String(fanout.content[0].text);
+	check(text.includes('repoA') && text.includes('repoB'), 'fan-out merged hits from both indexed children', text.slice(0, 120));
+	check(!text.includes('── repoC ──') && /not indexed yet/.test(text), 'unindexed child noted, not searched', text.slice(0, 160));
+	check(/umbrella root/.test(text), 'merged output explains the umbrella situation');
+	check(fanout.details?.summary?.totalHits === 2, 'summary counts hits across children', JSON.stringify(fanout.details));
+	const logged = fake.readLog('query').filter((q) => q.cwd.includes('fanout-umbrella'));
+	check(logged.length === 3, 'one failed query at the root + one per indexed child', logged.map((q) => q.cwd).join(','));
+	check(logged.some((q) => realpathSync(q.cwd) === realpathSync(join(umbrella, 'repoA'))), 'child query cwd pinned to repoA');
+	check(logged.every((q) => !q.cwd.includes('repoC')), 'the unindexed child is never queried');
+}
+delete process.env.ZFAKE_MODE;
+
+// --- root policy: zvec_index refuses $HOME and umbrella roots -----------------
 // umbrella fixture: a root whose children are three nested git repos
 const umbrella = join(ws, 'umbrella');
 for (const n of ['a', 'b', 'c']) fs.mkdirSync(join(umbrella, n, '.git'), { recursive: true });

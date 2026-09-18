@@ -93,7 +93,27 @@ try {
 		fs.mkdirSync(plain, { recursive: true });
 		const notWt = seedWorktreeIndex(plain);
 		assert.equal(notWt.seeded, false, 'non-worktree → skip');
-		assert.match(notWt.skipped ?? '', /not a worktree/);
+		assert.match(notWt.skipped ?? '', /no separate main checkout/);
+
+		// a plain submodule checkout (gitdir <main>/.git/modules/<sub>) seeds
+		// from the same submodule's checkout inside the main — the shape used
+		// by submodules inside an umbrella worktree
+		{
+			const main = makeBase();
+			fs.mkdirSync(path.join(main, '.git', 'modules', 'triton-inference'), { recursive: true });
+			fs.mkdirSync(path.join(main, 'triton-inference', '.zvec-grep'), { recursive: true });
+			fs.writeFileSync(path.join(main, 'triton-inference', '.zvec-grep', 'manifest.json'), JSON.stringify({
+				rootPaths: [{ absolutePath: path.join(main, 'triton-inference'), recursive: true }],
+			}));
+			fs.writeFileSync(path.join(main, 'triton-inference', '.zvec-grep', 'index.zvec'), 'sub-base');
+			const sub = path.join(home, `sub-${Math.random().toString(36).slice(2, 8)}`);
+			fs.mkdirSync(sub, { recursive: true });
+			fs.writeFileSync(path.join(sub, '.git'), `gitdir: ${main}/.git/modules/triton-inference\n`);
+			assert.equal(worktreeMainRoot(sub), path.join(main, 'triton-inference'), 'submodule gitfile → the submodule checkout in the main');
+			const seeded = seedWorktreeIndex(sub);
+			assert.equal(seeded.seeded, true, 'submodule checkout seeds from its main base');
+			assert.equal(fs.readFileSync(path.join(sub, '.zvec-grep', 'index.zvec'), 'utf8'), 'sub-base', 'submodule base copied');
+		}
 	}
 
 	// --- residue without a manifest is cleared before copying -------------------

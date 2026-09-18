@@ -246,7 +246,8 @@ try {
 		assert.ok(calls.exec.some((e) => e.args[0] === 'index' && e.args[1] === cwd), 'failure path still attempted the build');
 	}
 
-	// --- root policy: umbrella roots are never auto-indexed -------------------
+	// --- root policy: umbrella roots are never indexed THEMSELVES; their -----
+	// --- submodule repos are (so the search fan-out has indexes) --------------
 	{
 		process.env.ZFAKE_MODE = 'missing-index'; // own manifest missing → build would run
 		fake.resetState();
@@ -255,14 +256,33 @@ try {
 		for (const n of ['a', 'b', 'c']) fs.mkdirSync(path.join(cwd, n, '.git'), { recursive: true });
 		const notices = [];
 		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd, ui: { notify: (m, t) => notices.push({ m, t }) } }));
-		await settle(300);
-		assert.equal(fake.readState('index'), undefined, 'umbrella root: no index call');
-		assert.equal(fake.readState('status'), undefined, 'no status call either — the policy check runs first when the manifest is missing');
+		let childBuilds;
+		for (let i = 0; i < 40; i += 1) {
+			await settle(100);
+			childBuilds = fake.readLog('index').filter((e) => e.args[0].startsWith(cwd) && e.args[0] !== cwd);
+			if (childBuilds.length >= 3) break;
+		}
+		assert.equal(fake.readLog('index').filter((e) => e.args[0] === cwd).length, 0, 'umbrella root itself: never indexed');
+		assert.equal(childBuilds.length, 3, 'each depth-1 submodule repo is indexed in the background');
+		assert.deepEqual(childBuilds.map((e) => e.args[0]).sort(), ['a', 'b', 'c'].map((n) => path.join(cwd, n)).sort(), 'child builds pin their own roots');
 		assert.ok(
-			notices.some((n) => n.t === 'info' && /skipped/.test(n.m) && /umbrella/.test(n.m)),
-			'skip notice explains the umbrella reason',
+			notices.some((n) => n.t === 'info' && /umbrella/.test(n.m) && /background/.test(n.m)),
+			'notice explains the umbrella handling and the background indexing',
 			notices.map((n) => n.m).join(' | '),
 		);
+		// every child indexed → a later session start is silent (nothing to do).
+		// The fake zg records but never writes manifests — create them the way
+		// the real zg would, then re-emit.
+		for (const n of ['a', 'b', 'c']) {
+			fs.mkdirSync(path.join(cwd, n, '.zvec-grep'), { recursive: true });
+			fs.writeFileSync(path.join(cwd, n, '.zvec-grep', 'manifest.json'), '{}');
+		}
+		notices.length = 0;
+		fake.resetState();
+		await pi.emit('session_start', { type: 'session_start', reason: 'reload' }, makeCtx({ cwd, ui: { notify: (m, t) => notices.push({ m, t }) } }));
+		await settle(300);
+		assert.equal(notices.length, 0, 'healthy umbrella (all children indexed): silent');
+		assert.equal(fake.readLog('index').length, 0, 'no rebuilds when every child is indexed');
 	}
 
 	// --- root policy: allowRoots re-enables one specific root -----------------
