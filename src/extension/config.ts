@@ -127,10 +127,12 @@ function validRootPolicy(raw: unknown): RootPolicy | undefined {
 	const allowRoots = Array.isArray(record.allowRoots)
 		? record.allowRoots.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
 		: DEFAULT_ROOT_POLICY.allowRoots;
+	const allowNetworkFs =
+		typeof record.allowNetworkFs === 'boolean' ? record.allowNetworkFs : DEFAULT_ROOT_POLICY.allowNetworkFs;
 	const maxRaw = record.maxNestedRepos;
 	const maxNestedRepos =
 		typeof maxRaw === 'number' && Number.isFinite(maxRaw) && maxRaw >= 1 ? Math.round(maxRaw) : DEFAULT_ROOT_POLICY.maxNestedRepos;
-	return { allowRoots, maxNestedRepos };
+	return { allowRoots, maxNestedRepos, allowNetworkFs };
 }
 
 /**

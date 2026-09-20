@@ -20,6 +20,11 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-zvec-grep-rootpolicy-'));
 try {
 	const mod = await import(`../src/core/root-policy.ts?rootpolicy-test=${Date.now()}`);
 	const { assessRoot, countNestedRepos, enclosingGitRoot, expandTilde, DEFAULT_ROOT_POLICY } = mod;
+	const netfs = await import(`../src/core/netfs.ts?rootpolicy-test=${Date.now()}`);
+	// Hermetic: prime a purely local mount table so the network-fs rule
+	// never depends on the host's real mounts.
+	netfs.setMountTable([{ point: '/', type: 'apfs' }]);
+	netfs.setMountTable; // referenced for the finally cleanup below
 	const ws = await import(`../src/core/workspace.ts?rootpolicy-test=${Date.now()}`);
 	const { acquireAutoIndexLock } = ws;
 
@@ -98,7 +103,11 @@ try {
 	assert.equal(assessRoot(os.homedir(), { allowRoots: ['~'], maxNestedRepos: 3 }).allowed, false, 'allowRoots never unlocks $HOME');
 
 	// default policy object shape
-	assert.deepEqual(DEFAULT_ROOT_POLICY, { allowRoots: [], maxNestedRepos: 3 }, 'default policy: empty allowlist, threshold 3');
+	assert.deepEqual(
+		DEFAULT_ROOT_POLICY,
+		{ allowRoots: [], maxNestedRepos: 3, allowNetworkFs: false },
+		'default policy: empty allowlist, threshold 3, network fs off',
+	);
 
 	// --- enclosingGitRoot ------------------------------------------------------
 	{
@@ -152,5 +161,6 @@ try {
 
 	console.log('All root-policy assertions passed.');
 } finally {
+	(await import(`../src/core/netfs.ts?rootpolicy-test-cleanup=${Date.now()}`)).resetMountCache();
 	fs.rmSync(home, { recursive: true, force: true });
 }

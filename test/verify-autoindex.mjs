@@ -270,6 +270,10 @@ try {
 			'notice explains the umbrella handling and the background indexing',
 			notices.map((n) => n.m).join(' | '),
 		);
+		// let the background indexing's completion notice drain first (it
+		// races the silent check below), then reset the notice log.
+		await settle(500);
+		notices.length = 0;
 		// every child indexed → a later session start is silent (nothing to do).
 		// The fake zg records but never writes manifests — create them the way
 		// the real zg would, then re-emit.

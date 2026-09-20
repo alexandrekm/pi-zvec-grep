@@ -149,13 +149,31 @@ try {
 	fs.writeFileSync(userConfigFile(), JSON.stringify({ defaultLimit: 11, autoIndex: true, rootPolicy: { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 } }));
 	assert.deepEqual(
 		loadSettings(path.join(home, 'plain')).rootPolicy,
-		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 },
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false },
 		'raw strings kept: tilde expansion + realpath matching happen in assessRoot',
+	);
+	// allowNetworkFs round-trips per layer
+	fs.writeFileSync(userConfigFile(), JSON.stringify({ defaultLimit: 11, autoIndex: true, rootPolicy: { allowRoots: ['~/net-ok'], maxNestedRepos: 5, allowNetworkFs: true } }));
+	assert.equal(loadSettings(path.join(home, 'plain')).rootPolicy.allowNetworkFs, true, 'user-layer allowNetworkFs applies');
+	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, defaultLimit: 7, rootPolicy: { allowNetworkFs: false } }));
+	assert.equal(loadSettings(cwd).rootPolicy.allowNetworkFs, false, 'project-file allowNetworkFs wins when activated');
+	// restore the user rootPolicy the remaining assertions rely on
+	fs.writeFileSync(
+		userConfigFile(),
+		JSON.stringify({ defaultLimit: 11, autoIndex: true, rootPolicy: { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 } }),
 	);
 	// project scope: user rootPolicy does NOT leak in (built-ins apply)
 	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, defaultLimit: 7, rootPolicy: { maxNestedRepos: 2 } }));
-	assert.deepEqual(loadSettings(cwd).rootPolicy, { allowRoots: [], maxNestedRepos: 2 }, 'project file rootPolicy wins when activated');
-	assert.deepEqual(loadSettings(path.join(home, 'plain2')).rootPolicy, { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 }, 'user rootPolicy still applies elsewhere');
+	assert.deepEqual(
+		loadSettings(cwd).rootPolicy,
+		{ allowRoots: [], maxNestedRepos: 2, allowNetworkFs: false },
+		'project file rootPolicy wins when activated',
+	);
+	assert.deepEqual(
+		loadSettings(path.join(home, 'plain2')).rootPolicy,
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false },
+		'user rootPolicy still applies elsewhere',
+	);
 	// invalid shapes fall back per-sub-key, never to the other layer
 	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, rootPolicy: { allowRoots: 'nope', maxNestedRepos: -3 } }));
 	assert.deepEqual(loadSettings(cwd).rootPolicy, DEFAULT_ROOT_POLICY, 'invalid rootPolicy sub-keys -> built-in defaults, not the user layer');

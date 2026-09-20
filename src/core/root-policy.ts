@@ -29,6 +29,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { isNetworkFsRoot } from './netfs.ts';
 
 /** Persisted policy shape (the `rootPolicy` settings field). */
 export interface RootPolicy {
@@ -36,11 +37,20 @@ export interface RootPolicy {
 	allowRoots: string[];
 	/** ≥ this many nested git repos (depth ≤ 2) marks an umbrella root. */
 	maxNestedRepos: number;
+	/**
+	 * Allow indexing roots on network filesystems (NFS, SMB/CIFS, sshfs, …).
+	 * Off by default: building a local vector store over a network mount is
+	 * brutally slow, and every later freshness check re-stats the tree over
+	 * the wire — sessions hang the way the home-rooted index once made them.
+	 * allowRoots entries still bypass this too (explicit escapes win).
+	 */
+	allowNetworkFs: boolean;
 }
 
 export const DEFAULT_ROOT_POLICY: RootPolicy = {
 	allowRoots: [],
 	maxNestedRepos: 3,
+	allowNetworkFs: false,
 };
 
 /** Verdict for one candidate root. `reason` is set iff `allowed` is false;
@@ -48,7 +58,7 @@ export const DEFAULT_ROOT_POLICY: RootPolicy = {
  * the submodule fan-out instead of a plain refusal). */
 export interface RootAssessment {
 	allowed: boolean;
-	kind?: 'home' | 'umbrella';
+	kind?: 'home' | 'network' | 'umbrella';
 	reason?: string;
 }
 
@@ -192,6 +202,18 @@ export function assessRoot(root: string, policy: RootPolicy = DEFAULT_ROOT_POLIC
 	}
 	for (const allowed of policy.allowRoots) {
 		if (bestRealPath(path.resolve(expandTilde(allowed))) === realRoot) return { allowed: true };
+	}
+	if (!policy.allowNetworkFs && isNetworkFsRoot(realRoot)) {
+		return {
+			allowed: false,
+			kind: 'network',
+			reason:
+				'root is on a network filesystem (NFS/SMB/sshfs/…): building a local vector ' +
+				'store over the network is brutally slow, and every later freshness check ' +
+				're-stats the tree over the wire — sessions in that workspace hang. fts ' +
+				'searches (zvec_search) and bash rg still work without an index. To index ' +
+				'anyway, set rootPolicy.allowNetworkFs (or add the root to allowRoots)',
+		};
 	}
 	const threshold = Math.max(1, Math.round(policy.maxNestedRepos) || DEFAULT_ROOT_POLICY.maxNestedRepos);
 	const nested = countNestedRepos(realRoot, threshold);

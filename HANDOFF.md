@@ -450,3 +450,28 @@ append-log recorder, and resetState now clears .jsonl logs; surface suite
 covers the fan-out merge; autoindex suite covers submodule indexing and
 the healthy-silent path; seed suite covers the submodule gitfile shape.
 10 suites green.
+
+---
+
+# Fork notes addendum — round 4 (2026-09-19): network-filesystem guard
+
+New root-policy rule (v0.5.0): roots on network filesystems are refused by
+`zvec_index` and autoIndex unless `rootPolicy.allowNetworkFs` (or an
+`allowRoots` entry) explicitly allows it. Rationale: a local vector store
+built over NFS/SMB/sshfs is brutally slow, and every later freshness check
+re-stats the tree over the wire — sessions hang exactly the way the
+home-rooted index once made them.
+
+- `src/core/netfs.ts`: mount-table parsing for Linux mount(8), macOS
+  mount(8), and /proc/self/mounts shapes; longest-prefix resolution;
+  fail-open (unreadable table → behave as before). Fixes found while
+  testing: macOS single-token paren mounts (`(nfs)` — no comma), the root
+  mount point `/` vs prefix concat, the mount point ITSELF as target
+  (`real === entry.point`), and symlinked targets (realpath, not resolve).
+- `RootAssessment.kind` gains `'network'`; autoIndex notifies the reason
+  (no fan-out — the umbrella fan-out only applies to kind 'umbrella').
+- Hermetic tests (`netfs:test`) prime the mount table via a cache seam —
+  note for future suites: cache-busted `?query` imports create a SECOND
+  module instance with its own cache; prime the plain one.
+
+11 suites green.
