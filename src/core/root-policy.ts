@@ -54,13 +54,27 @@ export interface RootPolicy {
 	allowNetworkFs: boolean;
 	/**
 	 * Roots (absolute, or `~/…`) refused together with everything below
-	 * them. Default `["~/.pi"]` (pi's own state dirs). An exact `allowRoots`
+	 * them. Default: `~/.pi` (pi's own state dirs) and credential dirs (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.azure`, `~/.docker`). An exact `allowRoots`
 	 * entry still wins (explicit escapes win); `$HOME` stays refused always.
 	 */
 	denyRoots?: string[];
 }
 
-export const DEFAULT_DENY_ROOTS: readonly string[] = ['~/.pi'];
+/**
+ * pi's own state (huge, machine-written, near-duplicate transcripts) plus
+ * credential directories: a non-git cwd falls back to being the index root,
+ * so a session started in `~/.ssh` once embedded private-key material into a
+ * searchable local index.
+ */
+export const DEFAULT_DENY_ROOTS: readonly string[] = [
+	'~/.pi',
+	'~/.ssh',
+	'~/.aws',
+	'~/.gnupg',
+	'~/.kube',
+	'~/.azure',
+	'~/.docker',
+];
 
 export const DEFAULT_ROOT_POLICY: RootPolicy = {
 	allowRoots: [],
@@ -237,9 +251,9 @@ export function assessRoot(root: string, policy: RootPolicy = DEFAULT_ROOT_POLIC
 			kind: 'denied',
 			reason:
 				`root is inside denyRoots entry "${denied}": pi's own state (session transcripts, request ` +
-				'payloads) is large, machine-written and near-duplicate — an index there is pure noise and ' +
-				'gigabytes of disk. To index anyway, add the exact root to rootPolicy.allowRoots or edit ' +
-				'rootPolicy.denyRoots',
+				'payloads) is large, machine-written noise, and credential directories (~/.ssh, ~/.aws, …) ' +
+				'must not be embedded into a searchable index. To index anyway, add the exact root to ' +
+				'rootPolicy.allowRoots or edit rootPolicy.denyRoots',
 		};
 	}
 	if (!policy.allowNetworkFs && isNetworkFsRoot(realRoot)) {

@@ -21,6 +21,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { DEFAULT_DENY_ROOTS } from '../src/core/root-policy.ts';
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-zvec-grep-settings-'));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -149,7 +150,7 @@ try {
 	fs.writeFileSync(userConfigFile(), JSON.stringify({ defaultLimit: 11, autoIndex: true, rootPolicy: { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 } }));
 	assert.deepEqual(
 		loadSettings(path.join(home, 'plain')).rootPolicy,
-		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false, denyRoots: ['~/.pi'] },
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false, denyRoots: [...DEFAULT_DENY_ROOTS] },
 		'raw strings kept: tilde expansion + realpath matching happen in assessRoot',
 	);
 	// allowNetworkFs round-trips per layer
@@ -166,12 +167,12 @@ try {
 	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, defaultLimit: 7, rootPolicy: { maxNestedRepos: 2 } }));
 	assert.deepEqual(
 		loadSettings(cwd).rootPolicy,
-		{ allowRoots: [], maxNestedRepos: 2, allowNetworkFs: false, denyRoots: ['~/.pi'] },
+		{ allowRoots: [], maxNestedRepos: 2, allowNetworkFs: false, denyRoots: [...DEFAULT_DENY_ROOTS] },
 		'project file rootPolicy wins when activated',
 	);
 	assert.deepEqual(
 		loadSettings(path.join(home, 'plain2')).rootPolicy,
-		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false, denyRoots: ['~/.pi'] },
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false, denyRoots: [...DEFAULT_DENY_ROOTS] },
 		'user rootPolicy still applies elsewhere',
 	);
 	// invalid shapes fall back per-sub-key, never to the other layer

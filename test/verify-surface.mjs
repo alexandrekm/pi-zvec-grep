@@ -31,9 +31,31 @@ const fake = createFakeZg(root);
 const { pi, calls } = createFakePi({ binDir: fake.binDir, stateDir: fake.stateDir });
 
 const { default: piZvecGrep } = await import(join(__dirname, '..', 'index.ts'));
+// Management tools (zvec_index / zvec_status) are opt-in; the exhaustive
+// wiring checks below run with them enabled.
+process.env.PI_ZVEC_MANAGEMENT_TOOLS = '1';
 piZvecGrep(pi);
+delete process.env.PI_ZVEC_MANAGEMENT_TOOLS;
 
 const { assert: check, done } = createReporter();
+
+// --- default surface: only zvec_search, minimal schema ---------------------------
+{
+	const { pi: defaultPi, calls: defaultCalls } = createFakePi({ binDir: fake.binDir, stateDir: fake.stateDir });
+	piZvecGrep(defaultPi);
+	check(
+		defaultCalls.tools.map((t) => t.name).join(',') === 'zvec_search',
+		'default surface registers only zvec_search',
+		defaultCalls.tools.map((t) => t.name).join(','),
+	);
+	const props = Object.keys(defaultCalls.tools[0].parameters.properties).sort().join(',');
+	check(props === 'fts,limit,query,root', 'zvec_search advertises only query, fts, limit, root', props);
+	check(
+		JSON.stringify(defaultCalls.tools[0].parameters).length + defaultCalls.tools[0].description.length < 1500,
+		'zvec_search schema + description stays under 1.5k chars',
+	);
+	check(defaultCalls.commands.some((c) => c.name === 'zg'), '/zg is still registered by default');
+}
 
 const tool = (name) => {
 	const t = calls.tools.find((x) => x.name === name);
@@ -77,11 +99,7 @@ check(Array.isArray(search.promptGuidelines) && search.promptGuidelines.length >
 const prop = (t, name) => t.parameters.properties[name];
 check(prop(search, 'query')?.type === 'string', 'search.query is string');
 check(prop(search, 'query') === undefined || !Object.prototype.hasOwnProperty.call(prop(search, 'query'), 'default'), 'search.query has no default');
-for (const field of ['queries', 'fts', 'vector', 'globs', 'fileTypes', 'excludedFileTypes', 'symbolTypes']) {
-	const p = prop(search, field);
-	check(p?.type === 'array' && p.items?.type === 'string', `search.${field} is string[]`);
-}
-check(prop(search, 'fuse')?.type === 'boolean', 'search.fuse is boolean');
+check(prop(search, 'fts')?.type === 'array' && prop(search, 'fts').items?.type === 'string', 'search.fts is string[]');
 check(prop(search, 'limit')?.type === 'number', 'search.limit is number');
 check(prop(search, 'limit')?.maximum === 50, 'search.limit capped at 50');
 check(prop(search, 'root')?.type === 'string', 'search.root is optional string');

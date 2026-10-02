@@ -37,25 +37,20 @@ import { seedWorktreeIndex } from '../core/seed.ts';
  * route; plain `rg` stays the workhorse for exact text (counts, -l, pipes,
  * exit codes), which managed `zg query --rg` deliberately does not replace.
  */
-const SEARCH_GUIDANCE =
-	'For exact strings, regex, filenames, counts, file lists, or anything piped, use bash rg instead. ' +
-	'Without a workspace index only fts (managed ripgrep) can still match; zg reports a clear hint when an index is missing.';
+const SEARCH_GUIDANCE = 'For exact strings, regex, filenames, counts or file lists use bash rg instead.';
 
+/**
+ * Model-facing schema, deliberately minimal: every property is declared on
+ * every request, and the extra filters (query groups, globs, file/symbol
+ * types, mtime filters, fuse) were never used in practice. `execute` still
+ * accepts them (SearchToolInput extends ZvecSearchQueryParams) so callers
+ * and tests that pass them keep working — they just are not advertised.
+ */
 const searchParams = Type.Object({
-	query: Type.String({ description: 'The search query — one natural-language or exact phrase (required). Pass the question you are answering, e.g. "where is request routing configured"' }),
-	queries: Type.Optional(Type.Array(Type.String(), { description: 'Explicit hybrid query groups' })),
-	fts: Type.Optional(Type.Array(Type.String(), { description: 'Ranked lexical constraints (identifiers, exact phrases); not an exhaustive occurrence lookup' })),
-	vector: Type.Optional(Type.Array(Type.String(), { description: 'Semantic-only query groups' })),
-	fuse: Type.Optional(Type.Boolean({ description: 'Combine every query group into one ranked list' })),
-	limit: Type.Optional(Type.Number({ description: 'Max items per group (default 7, up to 50)', minimum: 1, maximum: 50 })),
-	globs: Type.Optional(Type.Array(Type.String(), { description: 'Ordered path globs; prefix with ! to exclude' })),
-	fileTypes: Type.Optional(Type.Array(Type.String(), { description: 'ripgrep include types (ts, py, md, ...)' })),
-	excludedFileTypes: Type.Optional(Type.Array(Type.String(), { description: 'ripgrep exclude types' })),
-	symbolTypes: Type.Optional(Type.Array(Type.String(), { description: 'Indexed symbol focus: module, class, interface, function, value, alias' })),
-	preferSymbol: Type.Optional(Type.Boolean({ description: 'Prefer exact indexed symbols' })),
-	modifiedAfter: Type.Optional(Type.String({ description: 'Only files modified after this date/time' })),
-	modifiedBefore: Type.Optional(Type.String({ description: 'Only files modified before this date/time' })),
-	root: Type.Optional(Type.String({ description: 'Workspace root to search; defaults to the current working directory' })),
+	query: Type.String({ description: 'Natural-language question or phrase, e.g. "where is request routing configured"' }),
+	fts: Type.Optional(Type.Array(Type.String(), { description: 'Exact identifiers/phrases that must match (ranked, not exhaustive)' })),
+	limit: Type.Optional(Type.Number({ description: 'Max hits (default 7, max 50)', minimum: 1, maximum: 50 })),
+	root: Type.Optional(Type.String({ description: 'Workspace root (default: cwd)' })),
 });
 
 const indexParams = Type.Object({
@@ -242,19 +237,28 @@ async function searchNestedRepos(
 	};
 }
 
-/** Register zvec_search / zvec_index / zvec_status. */
-export function registerZvecTools(pi: ExtensionAPI): void {
+/** Options for registerZvecTools. */
+export interface RegisterZvecToolsOptions {
+	/**
+	 * Also register the zvec_index / zvec_status tools (~1.9k chars of tool
+	 * schema on every request). Off by default: auto-index builds and updates
+	 * indexes in the background and `/zg` covers manual index/status, so models
+	 * had no reason to call them. Opt in with PI_ZVEC_MANAGEMENT_TOOLS=1.
+	 */
+	managementTools?: boolean;
+}
+
+/** Register zvec_search (always) and zvec_index / zvec_status (opt-in). */
+export function registerZvecTools(pi: ExtensionAPI, options: RegisterZvecToolsOptions = {}): void {
 	const runZg = createZgRunner((command, args, options) => pi.exec(command, args, options));
 
 	pi.registerTool({
 		name: 'zvec_search',
 		label: 'Zvec Search',
 		description:
-			'Hybrid semantic + keyword search over a locally indexed workspace (zvec-grep). ' +
-			'Use it when the answer is grounded in local files and the wording or location is unknown: ' +
-			'fuzzy concepts, relationships, call chains, cross-file synthesis, "where is X handled", design-rationale questions. ' +
-			'Call it with the required `query` parameter — a natural-language phrase describing what you are looking for. ' +
-			`Returns ranked hits with file, line range, symbols, and matching source. ${SEARCH_GUIDANCE}`,
+			'Hybrid semantic + keyword search over the indexed workspace (zvec-grep). ' +
+			'Use it when the location or wording is unknown: concepts, relationships, call chains, "where is X handled". ' +
+			`Returns ranked hits with file, lines, symbols and source. ${SEARCH_GUIDANCE}`,
 		promptSnippet: 'Semantic + exact hybrid search over the indexed workspace (local zvec-grep)',
 		promptGuidelines: [
 			'Before using grep or find for a "where is / how does / who calls" question, try zvec_search first with a natural-language query; ' +
@@ -322,6 +326,8 @@ export function registerZvecTools(pi: ExtensionAPI): void {
 			return new Text(line, 0, 0);
 		},
 	});
+
+	if (!options.managementTools) return;
 
 	pi.registerTool({
 		name: 'zvec_index',

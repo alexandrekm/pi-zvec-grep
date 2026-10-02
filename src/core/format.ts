@@ -178,10 +178,10 @@ export function parseStatusVerdict(stdout: string): ZgStatusVerdict | undefined 
 			modified > 0 ? `${modified} modified` : '',
 			deleted > 0 ? `${deleted} deleted` : '',
 		].filter(Boolean);
-		return { kind: 'needs-update', line: `index stale${bits.length > 0 ? ` · ${bits.join(' ')}` : ''} — run zvec_index` };
+		return { kind: 'needs-update', line: `index stale${bits.length > 0 ? ` · ${bits.join(' ')}` : ''} — run /zg index` };
 	}
 	if (/index is not configured/.test(first) || /No zvec-grep index/.test(first)) {
-		return { kind: 'missing', line: 'no index — run zvec_index' };
+		return { kind: 'missing', line: 'no index — run /zg index' };
 	}
 	return undefined;
 }

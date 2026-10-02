@@ -123,10 +123,24 @@ try {
 		);
 	}
 
+	// credential dirs are denied by default (real-home entries, fake-home test: use explicit list)
+	{
+		const ssh = path.join(home, '.ssh');
+		fs.mkdirSync(ssh, { recursive: true });
+		const withDefaults = { allowRoots: [], maxNestedRepos: 3, denyRoots: DEFAULT_ROOT_POLICY.denyRoots.map((d) => d.replace(/^~/, home)) };
+		assert.equal(assessRoot(ssh, withDefaults).allowed, false, '~/.ssh is denied by default');
+		assert.equal(assessRoot(ssh, withDefaults).kind, 'denied', '~/.ssh denial kind');
+	}
+
 	// default policy object shape
 	assert.deepEqual(
 		DEFAULT_ROOT_POLICY,
-		{ allowRoots: [], maxNestedRepos: 3, allowNetworkFs: false, denyRoots: ['~/.pi'] },
+		{
+			allowRoots: [],
+			maxNestedRepos: 3,
+			allowNetworkFs: false,
+			denyRoots: ['~/.pi', '~/.ssh', '~/.aws', '~/.gnupg', '~/.kube', '~/.azure', '~/.docker'],
+		},
 		'default policy: empty allowlist, threshold 3, network fs off',
 	);
 

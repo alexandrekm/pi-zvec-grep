@@ -10,7 +10,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { registerAutoIndex, registerZvecCommands, registerZvecTools } from './src/extension/tools.ts';
 
 export default function (pi: ExtensionAPI): void {
-	registerZvecTools(pi);
+	registerZvecTools(pi, { managementTools: process.env.PI_ZVEC_MANAGEMENT_TOOLS === '1' });
 	registerZvecCommands(pi);
 	registerAutoIndex(pi);
 }

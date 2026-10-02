@@ -141,10 +141,10 @@ check(rDirty?.kind === 'ready' && /3/.test(rDirty.line), 'ready with pending cha
 
 const st = parseStatusVerdict(STALE);
 check(st?.kind === 'needs-update' && st.line.includes('1 added') && st.line.includes('3 modified') && st.line.includes('2 deleted'), 'stale verdict carries change counts');
-check(st.line.includes('zvec_index'), 'stale verdict suggests zvec_index');
+check(st.line.includes('/zg index'), 'stale verdict suggests /zg index');
 
 const miss = parseStatusVerdict(MISSING);
-check(miss?.kind === 'missing' && miss.line === 'no index — run zvec_index', 'missing verdict');
+check(miss?.kind === 'missing' && miss.line === 'no index — run /zg index', 'missing verdict');
 
 const noErr = parseStatusVerdict('Error: No zvec-grep index found for this workspace\nCode: WORKSPACE_INDEX_NOT_FOUND');
 check(noErr?.kind === 'missing', 'zg no-index error block counts as missing');
