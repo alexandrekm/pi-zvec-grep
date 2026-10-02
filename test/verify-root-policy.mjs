@@ -102,10 +102,31 @@ try {
 	// allowRoots does NOT bypass the $HOME rule
 	assert.equal(assessRoot(os.homedir(), { allowRoots: ['~'], maxNestedRepos: 3 }).allowed, false, 'allowRoots never unlocks $HOME');
 
+	// denyRoots: pi's own state dirs are refused (root + everything below),
+	// an exact allowRoots entry wins, `[]` disables the rule
+	{
+		const piDir = path.join(home, '.pi', 'profiles', 'work');
+		fs.mkdirSync(path.join(piDir, 'payloads'), { recursive: true });
+		const deny = { allowRoots: [], maxNestedRepos: 3, denyRoots: [path.join(home, '.pi')] };
+		const v = assessRoot(piDir, deny);
+		assert.equal(v.allowed, false, 'a root below a denyRoots entry is refused');
+		assert.equal(v.kind, 'denied', 'denied kind');
+		assert.match(v.reason ?? '', /denyRoots/, 'reason names the rule');
+		assert.equal(assessRoot(path.join(home, '.pi'), deny).allowed, false, 'the denied root itself is refused');
+		assert.equal(assessRoot(path.join(home, '.pi-other'), deny).allowed, true, 'a sibling sharing the prefix is NOT denied');
+		assert.equal(assessRoot(piDir, { ...deny, allowRoots: [piDir] }).allowed, true, 'exact allowRoots entry overrides denyRoots');
+		assert.equal(assessRoot(piDir, { ...deny, denyRoots: [] }).allowed, true, 'empty denyRoots disables the rule');
+		assert.equal(
+			assessRoot(piDir, { allowRoots: [], maxNestedRepos: 3 }).allowed,
+			true,
+			'unset denyRoots falls back to ~/.pi, which is a different dir in this fake home',
+		);
+	}
+
 	// default policy object shape
 	assert.deepEqual(
 		DEFAULT_ROOT_POLICY,
-		{ allowRoots: [], maxNestedRepos: 3, allowNetworkFs: false },
+		{ allowRoots: [], maxNestedRepos: 3, allowNetworkFs: false, denyRoots: ['~/.pi'] },
 		'default policy: empty allowlist, threshold 3, network fs off',
 	);
 

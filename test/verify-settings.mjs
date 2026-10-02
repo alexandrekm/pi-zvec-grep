@@ -149,7 +149,7 @@ try {
 	fs.writeFileSync(userConfigFile(), JSON.stringify({ defaultLimit: 11, autoIndex: true, rootPolicy: { allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5 } }));
 	assert.deepEqual(
 		loadSettings(path.join(home, 'plain')).rootPolicy,
-		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false },
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false, denyRoots: ['~/.pi'] },
 		'raw strings kept: tilde expansion + realpath matching happen in assessRoot',
 	);
 	// allowNetworkFs round-trips per layer
@@ -166,12 +166,12 @@ try {
 	fs.writeFileSync(projFile, JSON.stringify({ projectScope: true, defaultLimit: 7, rootPolicy: { maxNestedRepos: 2 } }));
 	assert.deepEqual(
 		loadSettings(cwd).rootPolicy,
-		{ allowRoots: [], maxNestedRepos: 2, allowNetworkFs: false },
+		{ allowRoots: [], maxNestedRepos: 2, allowNetworkFs: false, denyRoots: ['~/.pi'] },
 		'project file rootPolicy wins when activated',
 	);
 	assert.deepEqual(
 		loadSettings(path.join(home, 'plain2')).rootPolicy,
-		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false },
+		{ allowRoots: ['~/umbrella-ok'], maxNestedRepos: 5, allowNetworkFs: false, denyRoots: ['~/.pi'] },
 		'user rootPolicy still applies elsewhere',
 	);
 	// invalid shapes fall back per-sub-key, never to the other layer

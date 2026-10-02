@@ -17,8 +17,15 @@
  *   below it resolve up to the stub and therefore permanently
  *   un-indexable. Leaf repos stay indexable only while no ancestor is.
  *
+ * - `denyRoots` — roots (and everything under them) that must never be
+ *   indexed, by default `~/.pi`: pi's own state (profile dirs holding
+ *   gigabytes of machine-written session transcripts and request payloads,
+ *   which are cumulative copies of each other — indexing them only yields a
+ *   huge, near-duplicate-noise index). Sessions whose cwd lands there (and
+ *   aren't inside a git repo) used to get one auto-built from the cwd.
+ *
  * `allowRoots` is the explicit escape hatch (a root that trips the
- * nested-repo heuristic but should be indexed anyway — knowing zg will
+ * nested-repo heuristic or the deny list but should be indexed anyway — knowing zg will
  * still skip the nested repos, only the root-level files get indexed).
  *
  * Pi-free by design (same rule as the rest of `src/core/`): plain node:fs
@@ -45,12 +52,21 @@ export interface RootPolicy {
 	 * allowRoots entries still bypass this too (explicit escapes win).
 	 */
 	allowNetworkFs: boolean;
+	/**
+	 * Roots (absolute, or `~/…`) refused together with everything below
+	 * them. Default `["~/.pi"]` (pi's own state dirs). An exact `allowRoots`
+	 * entry still wins (explicit escapes win); `$HOME` stays refused always.
+	 */
+	denyRoots?: string[];
 }
+
+export const DEFAULT_DENY_ROOTS: readonly string[] = ['~/.pi'];
 
 export const DEFAULT_ROOT_POLICY: RootPolicy = {
 	allowRoots: [],
 	maxNestedRepos: 3,
 	allowNetworkFs: false,
+	denyRoots: [...DEFAULT_DENY_ROOTS],
 };
 
 /** Verdict for one candidate root. `reason` is set iff `allowed` is false;
@@ -58,7 +74,7 @@ export const DEFAULT_ROOT_POLICY: RootPolicy = {
  * the submodule fan-out instead of a plain refusal). */
 export interface RootAssessment {
 	allowed: boolean;
-	kind?: 'home' | 'network' | 'umbrella';
+	kind?: 'home' | 'network' | 'umbrella' | 'denied';
 	reason?: string;
 }
 
@@ -76,6 +92,17 @@ export function expandTilde(s: string): string {
 	if (s === '~') return homedir();
 	if (s.startsWith('~/')) return path.join(homedir(), s.slice(2));
 	return s;
+}
+
+/** Is `child` the same path as `parent` or somewhere below it? */
+function isWithin(parent: string, child: string): boolean {
+	const rel = path.relative(parent, child);
+	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** The first `denyRoots` entry that contains `realRoot`, if any (realpath-based). */
+function matchingDenyRoot(realRoot: string, denyRoots: readonly string[]): string | undefined {
+	return denyRoots.find((denied) => isWithin(bestRealPath(path.resolve(expandTilde(denied))), realRoot));
 }
 
 /**
@@ -202,6 +229,18 @@ export function assessRoot(root: string, policy: RootPolicy = DEFAULT_ROOT_POLIC
 	}
 	for (const allowed of policy.allowRoots) {
 		if (bestRealPath(path.resolve(expandTilde(allowed))) === realRoot) return { allowed: true };
+	}
+	const denied = matchingDenyRoot(realRoot, policy.denyRoots ?? DEFAULT_DENY_ROOTS);
+	if (denied !== undefined) {
+		return {
+			allowed: false,
+			kind: 'denied',
+			reason:
+				`root is inside denyRoots entry "${denied}": pi's own state (session transcripts, request ` +
+				'payloads) is large, machine-written and near-duplicate — an index there is pure noise and ' +
+				'gigabytes of disk. To index anyway, add the exact root to rootPolicy.allowRoots or edit ' +
+				'rootPolicy.denyRoots',
+		};
 	}
 	if (!policy.allowNetworkFs && isNetworkFsRoot(realRoot)) {
 		return {

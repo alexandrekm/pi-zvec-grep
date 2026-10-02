@@ -28,7 +28,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
-import { DEFAULT_ROOT_POLICY, type RootPolicy } from '../core/root-policy.ts';
+import { DEFAULT_DENY_ROOTS, DEFAULT_ROOT_POLICY, type RootPolicy } from '../core/root-policy.ts';
 
 export { DEFAULT_ROOT_POLICY };
 
@@ -132,7 +132,10 @@ function validRootPolicy(raw: unknown): RootPolicy | undefined {
 	const maxRaw = record.maxNestedRepos;
 	const maxNestedRepos =
 		typeof maxRaw === 'number' && Number.isFinite(maxRaw) && maxRaw >= 1 ? Math.round(maxRaw) : DEFAULT_ROOT_POLICY.maxNestedRepos;
-	return { allowRoots, maxNestedRepos, allowNetworkFs };
+	const denyRoots = Array.isArray(record.denyRoots)
+		? record.denyRoots.filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+		: [...DEFAULT_DENY_ROOTS];
+	return { allowRoots, maxNestedRepos, allowNetworkFs, denyRoots };
 }
 
 /**
