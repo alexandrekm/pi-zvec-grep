@@ -72,6 +72,21 @@ try {
 		assert.equal(fake.readState('index'), undefined, 'autoIndex off: no index call');
 	}
 
+	// --- PI_ZVEC_AUTOINDEX=0 beats an enabled setting -------------------------
+	{
+		setAutoIndex(true);
+		fake.resetState();
+		process.env.PI_ZVEC_AUTOINDEX = '0';
+		const cwd = path.join(home, 'env-off');
+		fs.mkdirSync(cwd, { recursive: true });
+		await pi.emit('session_start', { type: 'session_start', reason: 'startup' }, makeCtx({ cwd }));
+		await settle(30);
+		delete process.env.PI_ZVEC_AUTOINDEX;
+		assert.equal(fake.readState('status'), undefined, 'PI_ZVEC_AUTOINDEX=0: no status call even with autoIndex on');
+		assert.equal(fake.readState('index'), undefined, 'PI_ZVEC_AUTOINDEX=0: no index call');
+		fs.rmSync(path.join(home, '.pi', 'agent', 'pi-zvec-grep'), { recursive: true, force: true });
+	}
+
 	// --- missing setting: treated as off, on any reason ----------------------
 	{
 		fs.rmSync(path.join(home, '.pi', 'agent', 'pi-zvec-grep'), { recursive: true, force: true });

@@ -612,6 +612,10 @@ export function registerAutoIndex(pi: ExtensionAPI): void {
 	};
 	pi.on('session_start', (_event, ctx) => {
 		const cwd = ctx.cwd;
+		// PI_ZVEC_AUTOINDEX=0 force-disables the hook (throwaway workspaces:
+		// measurement runs, CI) regardless of config — a background build that
+		// outlives its temp dir otherwise recreates it holding only .zvec-grep.
+		if (process.env.PI_ZVEC_AUTOINDEX === '0') return;
 		const settings = loadSettings(cwd);
 		if (!settings.autoIndex) return;
 		const root = enclosingGitRoot(cwd) ?? normalizeRoot(undefined, cwd);

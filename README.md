@@ -95,6 +95,8 @@ Config files are read fresh on every use (mtime-cached), so hand edits take effe
 }
 ```
 
+Env overrides: `PI_ZVEC_AUTOINDEX=0` force-disables the session-start auto-index hook whatever the config says (throwaway workspaces, measurement runs, CI); `PI_ZVEC_MANAGEMENT_TOOLS=1` registers the `zvec_index` / `zvec_status` tools.
+
 ## Quickstart
 
 ```bash
